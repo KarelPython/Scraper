@@ -1,5 +1,3 @@
-# Scraper
-Scraper pracovních nabídek z Jobs.cz
 # Scraper pracovních nabídek z Jobs.cz
 
 Tento projekt automaticky scrapuje pracovní nabídky z webu Jobs.cz podle zadaných lokalit a klíčového slova "python". Nalezené nabídky jsou ukládány do Google Sheets pro další analýzu.

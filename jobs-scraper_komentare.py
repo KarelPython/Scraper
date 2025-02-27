@@ -26,7 +26,7 @@ class JobsScraper:
         """
         # Inicializace scraperu s následujícími parametry:
         # locations_with_radius: seznam dvojic (lokalita, radius)
-        # Nastavení přístupu ke Google Sheets API
+        # Nastavení přístupu ke Google Docs API
         # Parametry:
         #   locations_with_radius: list of tuples [(str, int)] - seznam lokalit a jejich radiusů
         """
@@ -34,28 +34,44 @@ class JobsScraper:
         self.keyword = "python"  # Fixní hledaný výraz
         self.jobs_data = []
         
-        # Nastavení Google Sheets API
-        self.SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-        self.SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
+        # Nastavení Google Docs API
+        self.SCOPES = ['https://www.googleapis.com/auth/documents']
+        self.DOCUMENT_ID = os.getenv('DOCUMENT_ID')
         self.credentials = service_account.Credentials.from_service_account_file(
             'credentials.json', scopes=self.SCOPES)
-        self.service = build('sheets', 'v4', credentials=self.credentials)
+        self.service = build('docs', 'v1', credentials=self.credentials)
 
     def get_existing_jobs(self):
         """
-        # Načte existující nabídky z Google Sheets pro kontrolu duplicit
+        # Načte existující nabídky z Google Docs pro kontrolu duplicit
         # Vrací seznam URL adres již existujících nabídek
         # Returns:
         #   list[str]: seznam URL adres existujících nabídek
         # Raises:
-        #   HttpError: při problému s připojením ke Google Sheets
+        #   HttpError: při problému s připojením ke Google Docs
         """
         try:
-            result = self.service.spreadsheets().values().get(
-                spreadsheetId=self.SPREADSHEET_ID,
-                range='Sheet1!D:D'  # Sloupec s URL adresami
-            ).execute()
-            return [row[0] for row in result.get('values', [])[1:]]  # Přeskočí hlavičku
+            document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+            content = document.get('body').get('content')
+            
+            # Extrahujeme URL adresy z dokumentu
+            existing_urls = []
+            for element in content:
+                if 'paragraph' in element:
+                    for paragraph_element in element['paragraph']['elements']:
+                        if 'textRun' in paragraph_element:
+                            text = paragraph_element['textRun']['content']
+                            # Hledáme URL adresy v textu
+                            if 'https://www.jobs.cz' in text:
+                                # Jednoduchá extrakce URL - v reálném případě by bylo lepší použít regex
+                                url_start = text.find('https://www.jobs.cz')
+                                url_end = text.find(' ', url_start)
+                                if url_end == -1:
+                                    url_end = len(text)
+                                url = text[url_start:url_end].strip()
+                                existing_urls.append(url)
+            
+            return existing_urls
         except HttpError as err:
             logging.error(f"Chyba při načítání existujících nabídek: {err}")
             return []
@@ -123,40 +139,84 @@ class JobsScraper:
             logging.error(f"Chyba při získávání detailů nabídky: {e}")
             return None
 
-    def append_to_sheets(self, new_jobs):
+    def append_to_docs(self, new_jobs):
         """
-        # Přidá nové nabídky do Google Sheets
+        # Přidá nové nabídky do Google Docs
         # Formátuje data a přidává časové razítko
         # Parametry:
         #   new_jobs: list[dict] - seznam nových pracovních nabídek
         # Raises:
-        #   HttpError: při problému s připojením ke Google Sheets
+        #   HttpError: při problému s připojením ke Google Docs
         """
         try:
-            values = [[
-                job['title'],
-                job['company'],
-                job['salary'],
-                job['link'],
-                job['location'],
-                job['description'],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ] for job in new_jobs]
-
-            body = {
-                'values': values
-            }
+            # Získáme aktuální dokument
+            document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
             
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.SPREADSHEET_ID,
-                range='Sheet1!A:G',
-                valueInputOption='RAW',
-                body=body
+            # Připravíme obsah pro přidání
+            requests = []
+            
+            # Přidáme nadpis s datem
+            current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            requests.append({
+                'insertText': {
+                    'location': {
+                        'index': document['body']['content'][-1]['endIndex'] - 1
+                    },
+                    'text': f"\n\nNové nabídky nalezené {current_date}:\n"
+                }
+            })
+            
+            # Přidáme formátování nadpisu
+            end_index = document['body']['content'][-1]['endIndex'] - 1 + len(f"\n\nNové nabídky nalezené {current_date}:\n")
+            requests.append({
+                'updateTextStyle': {
+                    'range': {
+                        'startIndex': document['body']['content'][-1]['endIndex'] - 1,
+                        'endIndex': end_index
+                    },
+                    'textStyle': {
+                        'bold': True,
+                        'fontSize': {
+                            'magnitude': 14,
+                            'unit': 'PT'
+                        }
+                    },
+                    'fields': 'bold,fontSize'
+                }
+            })
+            
+            # Přidáme jednotlivé nabídky
+            for job in new_jobs:
+                job_text = (
+                    f"Pozice: {job['title']}\n"
+                    f"Společnost: {job['company']}\n"
+                    f"Lokalita: {job['location']}\n"
+                    f"Plat: {job['salary']}\n"
+                    f"URL: {job['link']}\n"
+                    f"Popis: {job['description']}\n\n"
+                    f"-------------------------------------------\n\n"
+                )
+                
+                requests.append({
+                    'insertText': {
+                        'location': {
+                            'index': end_index
+                        },
+                        'text': job_text
+                    }
+                })
+                
+                end_index += len(job_text)
+            
+            # Provedeme aktualizaci dokumentu
+            self.service.documents().batchUpdate(
+                documentId=self.DOCUMENT_ID,
+                body={'requests': requests}
             ).execute()
             
-            logging.info(f"Přidáno {len(new_jobs)} nových nabídek do Google Sheets")
+            logging.info(f"Přidáno {len(new_jobs)} nových nabídek do Google Docs")
         except HttpError as err:
-            logging.error(f"Chyba při ukládání do Google Sheets: {err}")
+            logging.error(f"Chyba při ukládání do Google Docs: {err}")
 
     def scrape_jobs(self):
         """
@@ -214,7 +274,7 @@ class JobsScraper:
                     break
 
         if new_jobs:
-            self.append_to_sheets(new_jobs)
+            self.append_to_docs(new_jobs)
         return new_jobs
 
 def main():
@@ -232,4 +292,4 @@ def main():
     scraper.scrape_jobs()
 
 if __name__ == "__main__":
-    main()
+    main() 

@@ -30,7 +30,7 @@ jobs:
       
     - name: Run scraper
       env:
-        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
       run: python jobs_scraper.py
       
     - name: Upload logs
@@ -43,4 +43,4 @@ jobs:
 
     - name: Clean up credentials
       if: always()
-      run: rm -f credentials.json
+      run: rm -f credentials.json 
