@@ -11,13 +11,13 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4    # Aktualizováno na v4
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v5    # Aktualizováno na v5
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.13'        # Aktualizováno na Python 3.13
-        cache: 'pip'                  # Přidáno cachování pip
+        python-version: '3.10'  # Změněno na stabilnější verzi Pythonu
+        cache: 'pip'
     
     - name: Install dependencies
       run: |
@@ -26,16 +26,20 @@ jobs:
         
     - name: Create credentials file
       run: |
-        echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
+        # Použití base64 pro bezpečný přenos JSON
+        echo '${{ secrets.GOOGLE_CREDENTIALS }}' | base64 --decode > credentials.json
       
     - name: Run scraper
       env:
         DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
-      run: python jobs_scraper.py
+      run: |
+        # Ověření platnosti JSON souboru před spuštěním scraperu
+        python -c "import json; f=open('credentials.json', 'r'); json.load(f); f.close(); print('Credentials file is valid JSON')"
+        python Scraper/jobs_scraper.py
       
     - name: Upload logs
-      if: always()    # Nahraje logy i v případě selhání
-      uses: actions/upload-artifact@v4    # Aktualizováno na v4
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
         name: scraper-logs
         path: scraper.log

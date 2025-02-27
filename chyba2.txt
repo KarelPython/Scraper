@@ -1,0 +1,3 @@
+Run python jobs_scraper.py
+2025-02-27 20:48:54,963 - ERROR - Invalid credentials file: Expecting property name enclosed in double quotes: line 2 column 3 (char 4)
+Error: Process completed with exit code 1.
