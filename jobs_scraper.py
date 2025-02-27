@@ -3,11 +3,12 @@ from bs4 import BeautifulSoup
 import time
 from datetime import datetime
 import logging
+import json
+import sys
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import json
 import os
 
 # Nastavení logování pro sledování průběhu scrapování a případných chyb
@@ -20,6 +21,15 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Ověření platnosti JSON souboru s credentials
+try:
+    with open('credentials.json', 'r') as f:
+        json.load(f)
+    logging.info("Credentials file is valid JSON")
+except json.JSONDecodeError as e:
+    logging.error(f"Invalid credentials file: {e}")
+    sys.exit(1)
 
 class JobsScraper:
     def __init__(self, locations_with_radius):
