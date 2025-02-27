@@ -1,0 +1,17 @@
+# Soubory s pověřeními
+credentials.json
+
+# Log soubory
+scraper.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE specific files - pokud používáte např. PyCharm
+.idea/
+*.iml
+
+# OS specific files
+.DS_Store # Mac OS
+Thumbs.db # Windows
