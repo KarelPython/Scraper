@@ -16,6 +16,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.api_core.exceptions import RetryError, GoogleAPIError
+import random
 
 # Získání absolutní cesty k adresáři, kde se nachází tento skript
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -209,7 +210,6 @@ class JobsScraper:
                         if retry_count >= max_retries:
                             raise
                         time.sleep(5)  # Čekáme 5 sekund před dalším pokusem
-                
             except Exception as e:
                 logging.error(f"Failed to initialize Google Docs API: {e}")
                 
@@ -356,15 +356,39 @@ class JobsScraper:
         try:
             logging.info(f"Stahuji detaily nabídky: {url}")
             
+            # Seznam různých user-agentů pro rotaci
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36 Edg/92.0.902.78'
+            ]
+            
+            # Náhodný výběr user-agenta
+            user_agent = random.choice(user_agents)
+            
             # Přidání náhodného user-agent pro snížení pravděpodobnosti blokování
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': user_agent,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'cs,en-US;q=0.7,en;q=0.3',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'max-age=0'
+                'Cache-Control': 'max-age=0',
+                # Přidání dalších hlaviček pro lepší maskování
+                'Referer': 'https://www.jobs.cz/prace/',
+                'DNT': '1',  # Do Not Track
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1'
             }
+            
+            # Náhodná pauza před odesláním požadavku
+            pause_time = random.uniform(2, 5)  # Náhodná pauza mezi 2-5 sekund
+            logging.info(f"Čekám {pause_time:.1f} sekund před stažením detailů nabídky")
+            time.sleep(pause_time)
             
             # Použití session s retry logikou a timeout
             try:
@@ -373,16 +397,40 @@ class JobsScraper:
             except requests.exceptions.SSLError as ssl_err:
                 logging.warning(f"SSL chyba při stahování {url}: {ssl_err}")
                 # Zkusíme znovu s vypnutou SSL verifikací
+                time.sleep(10)  # Delší pauza po chybě
                 response = self.session.get(url, headers=headers, timeout=15, verify=False)
                 response.raise_for_status()
             except requests.exceptions.RequestException as req_err:
                 logging.error(f"Chyba při stahování detailů nabídky {url}: {req_err}")
                 # Zkusíme ještě jednou s delším timeoutem
-                time.sleep(5)  # Počkáme 5 sekund
+                time.sleep(15)  # Delší pauza po chybě
+                response = self.session.get(url, headers=headers, timeout=30, verify=False)
+                response.raise_for_status()
+                
+            # Kontrola, zda jsme nebyli zablokováni (403 Forbidden)
+            if response.status_code == 403:
+                logging.warning(f"Detekováno blokování (403 Forbidden) pro URL: {url}")
+                logging.warning("Čekám 2 minuty před dalším pokusem...")
+                time.sleep(120)  # Čekáme 2 minuty
+                # Zkusíme znovu s jiným user-agentem
+                user_agent = random.choice(user_agents)
+                headers['User-Agent'] = user_agent
                 response = self.session.get(url, headers=headers, timeout=30, verify=False)
                 response.raise_for_status()
                 
             soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Kontrola, zda stránka obsahuje CAPTCHA nebo jiné známky blokování
+            if "captcha" in response.text.lower() or "robot" in response.text.lower() or "automated" in response.text.lower():
+                logging.warning(f"Detekována CAPTCHA nebo jiná ochrana proti robotům na URL: {url}")
+                logging.warning("Čekám 5 minut před dalším pokusem...")
+                time.sleep(300)  # Čekáme 5 minut
+                # Zkusíme znovu s jiným user-agentem
+                user_agent = random.choice(user_agents)
+                headers['User-Agent'] = user_agent
+                response = self.session.get(url, headers=headers, timeout=30, verify=False)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
             
             # Extrakce všech dostupných informací
             details = {}
@@ -409,6 +457,9 @@ class JobsScraper:
             
             details['title'] = title_element.text.strip() if title_element else "Neznámý název pozice"
             logging.info(f"Nalezen název pozice: {details['title']}")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce informací o společnosti - zkusíme více možných selektorů
             company_element = None
@@ -441,6 +492,9 @@ class JobsScraper:
             
             details['company'] = company_element.text.strip() if company_element else "Neznámá společnost"
             logging.info(f"Nalezena společnost: {details['company']}")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce lokality - zkusíme více možných selektorů
             location_element = None
@@ -477,6 +531,9 @@ class JobsScraper:
             details['location'] = location_element.text.strip() if location_element else "Neznámá lokalita"
             logging.info(f"Nalezena lokalita: {details['location']}")
             
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
+            
             # Extrakce platu - zkusíme více možných selektorů
             salary_element = None
             salary_selectors = [
@@ -510,6 +567,9 @@ class JobsScraper:
             
             details['salary'] = salary_element.text.strip() if salary_element else "Neuvedeno"
             logging.info(f"Nalezen plat: {details['salary']}")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce popisu pozice - zkusíme více možných selektorů
             description_element = None
@@ -554,6 +614,9 @@ class JobsScraper:
             else:
                 logging.info(f"Nalezen popis pozice: {details['description']}")
             
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
+            
             # Extrakce požadavků - zkusíme více možných selektorů
             requirements_element = None
             requirements_selectors = [
@@ -584,6 +647,9 @@ class JobsScraper:
             details['requirements'] = requirements_element.text.strip() if requirements_element else "Neuvedeno"
             if requirements_element:
                 logging.info(f"Nalezeny požadavky: {details['requirements'][:100]}...")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce typu úvazku
             job_type_element = None
@@ -616,6 +682,9 @@ class JobsScraper:
             if job_type_element:
                 logging.info(f"Nalezen typ úvazku: {details['job_type']}")
             
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
+            
             # Extrakce požadovaného vzdělání
             education_element = None
             education_selectors = [
@@ -646,6 +715,9 @@ class JobsScraper:
             details['education'] = education_element.text.strip() if education_element else "Neuvedeno"
             if education_element:
                 logging.info(f"Nalezeno požadované vzdělání: {details['education']}")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce požadovaných jazyků
             languages_element = None
@@ -678,6 +750,9 @@ class JobsScraper:
             if languages_element:
                 logging.info(f"Nalezeny požadované jazyky: {details['languages']}")
             
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
+            
             # Extrakce benefitů - zkusíme více možných selektorů
             benefits = []
             benefits_elements = soup.find_all('div', class_="Benefit")
@@ -704,6 +779,9 @@ class JobsScraper:
             details['benefits'] = benefits if benefits else ["Neuvedeno"]
             if benefits:
                 logging.info(f"Nalezeno {len(benefits)} benefitů")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce informací o společnosti - zkusíme více možných selektorů
             about_company_element = None
@@ -735,6 +813,9 @@ class JobsScraper:
             details['about_company'] = about_company_element.text.strip() if about_company_element else "Neuvedeno"
             if about_company_element:
                 logging.info(f"Nalezeny informace o společnosti: {details['about_company'][:100]}...")
+            
+            # Krátká pauza mezi extrakcí jednotlivých částí
+            time.sleep(random.uniform(0.5, 1.5))
             
             # Extrakce data zveřejnění - zkusíme více možných selektorů
             date_element = None
@@ -1084,8 +1165,8 @@ class JobsScraper:
                     for j, req in enumerate(batch_requests):
                         try:
                             self._execute_with_retry(
-                                self.service.documents().batchUpdate(
-                                    documentId=self.DOCUMENT_ID,
+            self.service.documents().batchUpdate(
+                documentId=self.DOCUMENT_ID,
                                     body={'requests': [req]}
                                 )
                             )
@@ -1183,12 +1264,25 @@ class JobsScraper:
             
             logging.info(f"Začínám scrapování s {len(processed_urls)} již existujícími nabídkami")
 
+            # Seznam různých user-agentů pro rotaci
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36 Edg/92.0.902.78'
+            ]
+
             # Procházení všech zadaných lokalit
             for location, radius in self.locations:
                 page = 1
                 consecutive_empty_pages = 0
                 max_empty_pages = 3  # Pokud 3 stránky po sobě nemají nové nabídky, ukončíme procházení
                 max_pages = 50  # Maximální počet stránek pro procházení
+                
+                # Počítadlo požadavků pro prevenci blokování
+                request_count = 0
+                max_requests_before_long_pause = 5  # Po tomto počtu požadavků uděláme delší pauzu
                 
                 while page <= max_pages:
                     try:
@@ -1199,33 +1293,72 @@ class JobsScraper:
 
                         logging.info(f"Stahuji nabídky pro lokalitu {location}, stránka {page}")
                         
+                        # Rotace user-agentů pro snížení pravděpodobnosti blokování
+                        user_agent = user_agents[request_count % len(user_agents)]
+                        
                         # Přidání náhodného user-agent pro snížení pravděpodobnosti blokování
                         headers = {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'User-Agent': user_agent,
                             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                             'Accept-Language': 'cs,en-US;q=0.7,en;q=0.3',
                             'Connection': 'keep-alive',
                             'Upgrade-Insecure-Requests': '1',
-                            'Cache-Control': 'max-age=0'
+                            'Cache-Control': 'max-age=0',
+                            # Přidání dalších hlaviček pro lepší maskování
+                            'Referer': 'https://www.jobs.cz/',
+                            'DNT': '1',  # Do Not Track
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'same-origin',
+                            'Sec-Fetch-User': '?1'
                         }
+                        
+                        # Zvýšení počítadla požadavků
+                        request_count += 1
+                        
+                        # Delší pauza po určitém počtu požadavků
+                        if request_count % max_requests_before_long_pause == 0:
+                            pause_time = random.uniform(20, 40)  # Náhodná pauza mezi 20-40 sekund
+                            logging.info(f"Preventivní delší pauza ({pause_time:.1f} sekund) po {max_requests_before_long_pause} požadavcích")
+                            time.sleep(pause_time)
                         
                         # Použití session s retry logikou a timeout
                         try:
+                            # Náhodná pauza před každým požadavkem
+                            pause_time = random.uniform(3, 8)  # Náhodná pauza mezi 3-8 sekund
+                            logging.info(f"Čekám {pause_time:.1f} sekund před odesláním požadavku")
+                            time.sleep(pause_time)
+                            
                             response = self.session.get(url, headers=headers, timeout=15, verify=False)
                             response.raise_for_status()
                         except requests.exceptions.SSLError as ssl_err:
                             logging.warning(f"SSL chyba při stahování {url}: {ssl_err}")
                             # Zkusíme znovu s vypnutou SSL verifikací
+                            time.sleep(10)  # Delší pauza po chybě
                             response = self.session.get(url, headers=headers, timeout=15, verify=False)
                             response.raise_for_status()
                         except requests.exceptions.RequestException as req_err:
                             logging.error(f"Chyba při stahování stránky {url}: {req_err}")
                             # Zkusíme ještě jednou s delším timeoutem
-                            time.sleep(5)  # Počkáme 5 sekund
+                            time.sleep(15)  # Delší pauza po chybě
                             response = self.session.get(url, headers=headers, timeout=30, verify=False)
                             response.raise_for_status()
                             
+                        # Kontrola, zda jsme nebyli zablokováni (403 Forbidden)
+                        if response.status_code == 403:
+                            logging.warning(f"Detekováno blokování (403 Forbidden) pro URL: {url}")
+                            logging.warning("Čekám 2 minuty před dalším pokusem...")
+                            time.sleep(120)  # Čekáme 2 minuty
+                            continue
+                            
                         soup = BeautifulSoup(response.content, 'html.parser')
+
+                        # Kontrola, zda stránka obsahuje CAPTCHA nebo jiné známky blokování
+                        if "captcha" in response.text.lower() or "robot" in response.text.lower() or "automated" in response.text.lower():
+                            logging.warning(f"Detekována CAPTCHA nebo jiná ochrana proti robotům na URL: {url}")
+                            logging.warning("Čekám 5 minut před dalším pokusem...")
+                            time.sleep(300)  # Čekáme 5 minut
+                            continue
 
                         jobs = soup.find_all('h2', class_="SearchResultCard__title")
                         
@@ -1237,7 +1370,7 @@ class JobsScraper:
                                 logging.info(f"Ukončuji procházení pro lokalitu {location} - {max_empty_pages} prázdných stránek po sobě")
                                 break
                             page += 1
-                            time.sleep(2)
+                            time.sleep(random.uniform(2, 5))  # Náhodná pauza mezi 2-5 sekund
                             continue
                         
                         # Počítadlo nových nabídek na této stránce
@@ -1254,6 +1387,10 @@ class JobsScraper:
                             # Kontrola duplicit - jak proti existujícím nabídkám, tak proti již zpracovaným v tomto běhu
                             if link not in processed_urls:
                                 processed_urls.add(link)  # Přidáme do zpracovaných URL
+                                
+                                # Náhodná pauza před stažením detailů
+                                time.sleep(random.uniform(2, 5))  # Náhodná pauza mezi 2-5 sekund
+                                
                                 details = self.get_job_details(link)
                                 if details:
                                     job_data = {
@@ -1264,7 +1401,9 @@ class JobsScraper:
                                     new_jobs.append(job_data)
                                     new_jobs_on_page += 1
                                     logging.info(f"Nalezena nová nabídka: {title} v {location}")
-                                    time.sleep(1)  # Prodleva mezi požadavky
+                                    
+                                    # Náhodná pauza mezi zpracováním nabídek
+                                    time.sleep(random.uniform(1, 3))  # Náhodná pauza mezi 1-3 sekundy
                             else:
                                 logging.info(f"Přeskakuji duplicitní nabídku: {title}")
                         
@@ -1280,7 +1419,11 @@ class JobsScraper:
                             logging.info(f"Nalezeno {new_jobs_on_page} nových nabídek na stránce {page}")
 
                         page += 1
-                        time.sleep(2)  # Prodleva mezi stránkami
+                        
+                        # Náhodná pauza mezi stránkami
+                        pause_time = random.uniform(5, 10)  # Náhodná pauza mezi 5-10 sekund
+                        logging.info(f"Čekám {pause_time:.1f} sekund před přechodem na další stránku")
+                        time.sleep(pause_time)
 
                         # V testovacím režimu omezíme počet stránek
                         if self.test_mode and page > 1:
@@ -1296,7 +1439,7 @@ class JobsScraper:
                         logging.error(f"Chyba při scrapování stránky {page} pro lokalitu {location}: {e}")
                         # Pokračujeme další stránkou i v případě chyby
                         page += 1
-                        time.sleep(5)  # Delší pauza po chybě
+                        time.sleep(15)  # Delší pauza po chybě
                         continue
 
             # Výpis souhrnných informací
