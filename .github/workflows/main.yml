@@ -26,16 +26,32 @@ jobs:
         
     - name: Create credentials file
       run: |
-        # Použití base64 pro bezpečný přenos JSON
-        echo '${{ secrets.GOOGLE_CREDENTIALS }}' | base64 --decode > credentials.json
+        # Vytvoření JSON souboru pomocí Python skriptu
+        python -c "
+        import json
+        import os
+        
+        # Načtení obsahu proměnné prostředí
+        creds_json = '''${{ secrets.GOOGLE_CREDENTIALS }}'''
+        
+        # Uložení do souboru
+        with open('credentials.json', 'w') as f:
+            f.write(creds_json)
+        
+        # Ověření platnosti JSON
+        try:
+            with open('credentials.json', 'r') as f:
+                json.load(f)
+            print('Credentials file is valid JSON')
+        except json.JSONDecodeError as e:
+            print(f'Error: {e}')
+            exit(1)
+        "
       
     - name: Run scraper
       env:
         DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
-      run: |
-        # Ověření platnosti JSON souboru před spuštěním scraperu
-        python -c "import json; f=open('credentials.json', 'r'); json.load(f); f.close(); print('Credentials file is valid JSON')"
-        python Scraper/jobs_scraper.py
+      run: python Scraper/jobs_scraper.py
       
     - name: Upload logs
       if: always()
