@@ -29,15 +29,35 @@ jobs:
         # Vytvoření JSON souboru přímo z tajné proměnné
         echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
         
-        # Kontrola formátu JSON pomocí jq (standardní nástroj pro práci s JSON)
-        sudo apt-get update && sudo apt-get install -y jq
-        if ! jq . credentials.json > /dev/null 2>&1; then
-          echo "Error: credentials.json is not a valid JSON file"
-          cat credentials.json | head -n 5
-          exit 1
-        else
-          echo "credentials.json is valid JSON"
-        fi
+        # Kontrola formátu JSON pomocí Python
+        python -c "
+        import json
+        import sys
+        
+        try:
+            with open('credentials.json', 'r') as f:
+                creds = json.load(f)
+                
+            # Kontrola základních polí
+            required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+            missing_fields = [field for field in required_fields if field not in creds]
+            
+            if missing_fields:
+                print(f'Error: Credentials file is missing required fields: {\", \".join(missing_fields)}')
+                sys.exit(1)
+                
+            print('Credentials file is valid JSON with all required fields')
+            print(f'Service account type: {creds.get(\"type\", \"unknown\")}')
+            print(f'Project ID: {creds.get(\"project_id\", \"unknown\")}')
+            print(f'Client email: {creds.get(\"client_email\", \"unknown\")}')
+            
+        except json.JSONDecodeError as e:
+            print(f'Error: Invalid JSON format in credentials file: {e}')
+            sys.exit(1)
+        except Exception as e:
+            print(f'Error: {e}')
+            sys.exit(1)
+        "
       
     - name: List directory structure
       run: |
@@ -49,6 +69,8 @@ jobs:
     - name: Run scraper
       env:
         DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
+        # Přidáme proměnnou pro testovací režim
+        TEST_MODE: "true"
       run: |
         # Zjistíme, kde přesně je soubor jobs_scraper.py
         find . -name "jobs_scraper.py" -type f

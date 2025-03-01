@@ -15,6 +15,9 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Nastavení pracovního adresáře na adresář skriptu
 os.chdir(script_dir)
 
+# Kontrola, zda jsme v testovacím režimu
+TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
+
 # Nastavení logování pro sledování průběhu scrapování a případných chyb
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +30,7 @@ logging.basicConfig(
 
 logging.info(f"Skript spuštěn z adresáře: {os.getcwd()}")
 logging.info(f"Adresář skriptu: {script_dir}")
+logging.info(f"Testovací režim: {'ZAPNUTÝ' if TEST_MODE else 'VYPNUTÝ'}")
 
 # Ověření existence a platnosti JSON souboru s credentials
 try:
@@ -45,40 +49,65 @@ try:
             logging.info(f"Credentials file found at: {path}")
             break
     
-    if not credentials_path:
+    if not credentials_path and not TEST_MODE:
         logging.error("Credentials file not found in any of the expected locations")
         sys.exit(1)
+    elif not credentials_path and TEST_MODE:
+        logging.warning("Credentials file not found, but continuing in TEST_MODE")
     
     # Pokus o načtení a opravu JSON souboru
-    with open(credentials_path, 'r') as f:
-        credentials_content = f.read().strip()
-    
-    # Pokus o parsování JSON
-    try:
-        json.loads(credentials_content)
-        logging.info(f"Credentials file is valid JSON")
-    except json.JSONDecodeError as e:
-        logging.error(f"Invalid credentials file: {e}")
-        logging.info("Attempting to fix common JSON formatting issues...")
+    if credentials_path:
+        with open(credentials_path, 'r') as f:
+            credentials_content = f.read().strip()
         
-        # Pokus o opravu běžných problémů s JSON formátem
-        if credentials_content.startswith("'") and credentials_content.endswith("'"):
-            credentials_content = credentials_content[1:-1]
-        
-        # Pokus o parsování opraveného JSON
+        # Pokus o parsování JSON
         try:
-            json.loads(credentials_content)
-            # Uložení opraveného JSON
-            with open(credentials_path, 'w') as f:
-                f.write(credentials_content)
-            logging.info("Successfully fixed JSON format issues")
-        except json.JSONDecodeError:
-            logging.error("Could not fix JSON format issues")
-            sys.exit(1)
+            creds_json = json.loads(credentials_content)
+            logging.info(f"Credentials file is valid JSON")
+            
+            # Kontrola základních polí v credentials
+            required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+            missing_fields = [field for field in required_fields if field not in creds_json]
+            
+            if missing_fields and not TEST_MODE:
+                logging.error(f"Credentials file is missing required fields: {', '.join(missing_fields)}")
+                sys.exit(1)
+            elif missing_fields and TEST_MODE:
+                logging.warning(f"Credentials file is missing required fields: {', '.join(missing_fields)}, but continuing in TEST_MODE")
+            
+            # Výpis základních informací o credentials (bez citlivých údajů)
+            logging.info(f"Service account type: {creds_json.get('type', 'unknown')}")
+            logging.info(f"Project ID: {creds_json.get('project_id', 'unknown')}")
+            logging.info(f"Client email: {creds_json.get('client_email', 'unknown')}")
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid credentials file: {e}")
+            if not TEST_MODE:
+                logging.info("Attempting to fix common JSON formatting issues...")
+                
+                # Pokus o opravu běžných problémů s JSON formátem
+                if credentials_content.startswith("'") and credentials_content.endswith("'"):
+                    credentials_content = credentials_content[1:-1]
+                
+                # Pokus o parsování opraveného JSON
+                try:
+                    creds_json = json.loads(credentials_content)
+                    # Uložení opraveného JSON
+                    with open(credentials_path, 'w') as f:
+                        f.write(credentials_content)
+                    logging.info("Successfully fixed JSON format issues")
+                except json.JSONDecodeError:
+                    logging.error("Could not fix JSON format issues")
+                    sys.exit(1)
+            else:
+                logging.warning("Invalid credentials file, but continuing in TEST_MODE")
         
 except Exception as e:
     logging.error(f"Error processing credentials file: {e}")
-    sys.exit(1)
+    if not TEST_MODE:
+        sys.exit(1)
+    else:
+        logging.warning("Continuing in TEST_MODE despite credentials error")
 
 class JobsScraper:
     def __init__(self, locations_with_radius):
@@ -92,25 +121,56 @@ class JobsScraper:
         self.locations = locations_with_radius
         self.keyword = "python"  # Fixní hledaný výraz
         self.jobs_data = []
+        self.test_mode = TEST_MODE
         
         # Nastavení Google Docs API
         self.SCOPES = ['https://www.googleapis.com/auth/documents']
         self.DOCUMENT_ID = os.getenv('DOCUMENT_ID')
         
-        if not self.DOCUMENT_ID:
+        if not self.DOCUMENT_ID and not self.test_mode:
             logging.error("DOCUMENT_ID environment variable is not set")
             sys.exit(1)
+        elif not self.DOCUMENT_ID and self.test_mode:
+            logging.warning("DOCUMENT_ID environment variable is not set, but continuing in TEST_MODE")
+            self.DOCUMENT_ID = "test_document_id"
             
-        try:
-            self.credentials = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=self.SCOPES)
-            self.service = build('docs', 'v1', credentials=self.credentials)
-            # Test připojení k API
-            self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
-            logging.info("Successfully connected to Google Docs API")
-        except Exception as e:
-            logging.error(f"Failed to initialize Google Docs API: {e}")
-            sys.exit(1)
+        if not self.test_mode:
+            try:
+                logging.info("Initializing Google Docs API connection...")
+                self.credentials = service_account.Credentials.from_service_account_file(
+                    credentials_path, scopes=self.SCOPES)
+                
+                # Výpis informací o credentials pro diagnostiku
+                logging.info(f"Service account email: {self.credentials.service_account_email}")
+                logging.info(f"Token URI: {self.credentials._token_uri}")
+                
+                self.service = build('docs', 'v1', credentials=self.credentials)
+                
+                # Test připojení k API
+                logging.info(f"Testing connection to Google Docs API with document ID: {self.DOCUMENT_ID}")
+                self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+                logging.info("Successfully connected to Google Docs API")
+            except Exception as e:
+                logging.error(f"Failed to initialize Google Docs API: {e}")
+                
+                # Pokud je chyba související s oprávněními, poskytneme další informace
+                if "invalid_grant" in str(e):
+                    logging.error("This error typically occurs when:")
+                    logging.error("1. Service account credentials are invalid or expired")
+                    logging.error("2. The service account doesn't exist or was deleted")
+                    logging.error("3. The Google Docs document doesn't exist")
+                    logging.error("4. The service account doesn't have permission to access the document")
+                    
+                    logging.error("\nŘešení:")
+                    logging.error("1. Zkontrolujte, zda je service account aktivní v Google Cloud Console")
+                    logging.error("2. Ujistěte se, že jste sdíleli Google Docs dokument s emailem service accountu")
+                    logging.error("3. Zkontrolujte, zda je ID dokumentu správné")
+                    logging.error("4. Vygenerujte nové credentials pro service account")
+                
+                sys.exit(1)
+        else:
+            logging.info("Skipping Google Docs API initialization in TEST_MODE")
+            self.service = None
 
     def get_existing_jobs(self):
         """
@@ -121,6 +181,10 @@ class JobsScraper:
         # Raises:
         #   HttpError: při problému s připojením ke Google Docs
         """
+        if self.test_mode:
+            logging.info("Skipping loading existing jobs in TEST_MODE")
+            return []
+            
         try:
             document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
             content = document.get('body').get('content')
@@ -219,6 +283,12 @@ class JobsScraper:
         # Raises:
         #   HttpError: při problému s připojením ke Google Docs
         """
+        if self.test_mode:
+            logging.info(f"TEST_MODE: Would add {len(new_jobs)} jobs to Google Docs")
+            for job in new_jobs:
+                logging.info(f"TEST_MODE: Job: {job['title']} at {job['company']}")
+            return
+            
         try:
             # Získáme aktuální dokument
             document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
@@ -339,6 +409,11 @@ class JobsScraper:
 
                     page += 1
                     time.sleep(2)  # Prodleva mezi stránkami
+
+                    # V testovacím režimu omezíme počet stránek
+                    if self.test_mode and page > 1:
+                        logging.info("TEST_MODE: Omezení na 1 stránku výsledků")
+                        break
 
                 except Exception as e:
                     logging.error(f"Chyba při scrapování stránky {page} pro lokalitu {location}: {e}")
