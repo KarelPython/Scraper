@@ -225,8 +225,24 @@ class JobsScraper:
             title = job_element.text.strip()
             link_element = job_element.find('a')
             link = link_element['href'] if link_element else None
-            if link and not link.startswith('http'):
+            
+            if not link:
+                return None, None
+                
+            # Zajistíme, že URL začíná správně
+            if not link.startswith('http'):
                 link = 'https://www.jobs.cz' + link
+                
+            # Odstranění parametrů z URL pro konzistentní porovnávání
+            # Například: https://www.jobs.cz/pd/123456?param=value -> https://www.jobs.cz/pd/123456
+            if '?' in link:
+                link = link.split('?')[0]
+                
+            # Odstranění koncového lomítka pro konzistentní porovnávání
+            if link.endswith('/'):
+                link = link[:-1]
+                
+            logging.debug(f"Zpracována nabídka: {title} s URL: {link}")
             return title, link
         except Exception as e:
             logging.error(f"Chyba při parsování nabídky: {e}")
@@ -369,10 +385,16 @@ class JobsScraper:
         """
         existing_jobs = self.get_existing_jobs()
         new_jobs = []
+        
+        # Pomocný set pro sledování již zpracovaných URL v rámci aktuálního běhu
+        processed_urls = set(existing_jobs)
 
         # Procházení všech zadaných lokalit
         for location, radius in self.locations:
             page = 1
+            consecutive_empty_pages = 0
+            max_empty_pages = 3  # Pokud 3 stránky po sobě nemají nové nabídky, ukončíme procházení
+            
             while True:
                 try:
                     # Sestavení URL pro aktuální stránku a lokalitu
@@ -386,16 +408,26 @@ class JobsScraper:
                     soup = BeautifulSoup(response.content, 'html.parser')
 
                     jobs = soup.find_all('h2', class_="SearchResultCard__title")
+                    
+                    # Kontrola, zda stránka obsahuje nabídky
                     if not jobs:
+                        logging.info(f"Žádné nabídky na stránce {page} pro lokalitu {location}")
                         break
+                    
+                    # Počítadlo nových nabídek na této stránce
+                    new_jobs_on_page = 0
+                    
+                    # Výpis počtu nalezených nabídek na stránce
+                    logging.info(f"Nalezeno {len(jobs)} nabídek na stránce {page}")
 
                     for job in jobs:
                         title, link = self.parse_job_listing(job)
                         if not title or not link:
                             continue
 
-                        # Kontrola duplicit
-                        if link not in existing_jobs:
+                        # Kontrola duplicit - jak proti existujícím nabídkám, tak proti již zpracovaným v tomto běhu
+                        if link not in processed_urls:
+                            processed_urls.add(link)  # Přidáme do zpracovaných URL
                             details = self.get_job_details(link)
                             if details:
                                 job_data = {
@@ -404,8 +436,22 @@ class JobsScraper:
                                     **details
                                 }
                                 new_jobs.append(job_data)
+                                new_jobs_on_page += 1
                                 logging.info(f"Nalezena nová nabídka: {title} v {location}")
                                 time.sleep(1)  # Prodleva mezi požadavky
+                        else:
+                            logging.info(f"Přeskakuji duplicitní nabídku: {title}")
+                    
+                    # Kontrola, zda jsme našli nějaké nové nabídky na této stránce
+                    if new_jobs_on_page == 0:
+                        consecutive_empty_pages += 1
+                        logging.info(f"Žádné nové nabídky na stránce {page}, počet prázdných stránek po sobě: {consecutive_empty_pages}")
+                        if consecutive_empty_pages >= max_empty_pages:
+                            logging.info(f"Ukončuji procházení pro lokalitu {location} - {max_empty_pages} prázdných stránek po sobě")
+                            break
+                    else:
+                        consecutive_empty_pages = 0  # Resetujeme počítadlo, pokud jsme našli nějaké nové nabídky
+                        logging.info(f"Nalezeno {new_jobs_on_page} nových nabídek na stránce {page}")
 
                     page += 1
                     time.sleep(2)  # Prodleva mezi stránkami
@@ -414,11 +460,19 @@ class JobsScraper:
                     if self.test_mode and page > 1:
                         logging.info("TEST_MODE: Omezení na 1 stránku výsledků")
                         break
+                    
+                    # Omezení maximálního počtu stránek (pro případ, že by web vracel nekonečně mnoho stránek)
+                    if page > 50:
+                        logging.warning(f"Dosažen maximální počet stránek (50) pro lokalitu {location}")
+                        break
 
                 except Exception as e:
                     logging.error(f"Chyba při scrapování stránky {page} pro lokalitu {location}: {e}")
                     break
 
+        # Výpis souhrnných informací
+        logging.info(f"Celkem nalezeno {len(new_jobs)} nových nabídek")
+        
         if new_jobs:
             self.append_to_docs(new_jobs)
         return new_jobs
