@@ -10,22 +10,43 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Získání absolutní cesty k adresáři, kde se nachází tento skript
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Nastavení pracovního adresáře na adresář skriptu
+os.chdir(script_dir)
+
 # Nastavení logování pro sledování průběhu scrapování a případných chyb
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('scraper.log', encoding='utf-8'),
+        logging.FileHandler(os.path.join(script_dir, 'scraper.log'), encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 
+logging.info(f"Skript spuštěn z adresáře: {os.getcwd()}")
+logging.info(f"Adresář skriptu: {script_dir}")
+
 # Ověření existence a platnosti JSON souboru s credentials
 try:
-    credentials_path = 'credentials.json'
+    # Zkusíme najít credentials.json v různých umístěních
+    possible_paths = [
+        'credentials.json',
+        '../credentials.json',
+        os.path.join(script_dir, 'credentials.json'),
+        os.path.join(os.path.dirname(script_dir), 'credentials.json')
+    ]
     
-    if not os.path.exists(credentials_path):
-        logging.error(f"Credentials file not found at {credentials_path}")
+    credentials_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            credentials_path = path
+            logging.info(f"Credentials file found at: {path}")
+            break
+    
+    if not credentials_path:
+        logging.error("Credentials file not found in any of the expected locations")
         sys.exit(1)
     
     # Pokus o načtení a opravu JSON souboru

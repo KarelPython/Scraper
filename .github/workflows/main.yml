@@ -39,17 +39,31 @@ jobs:
           echo "credentials.json is valid JSON"
         fi
       
+    - name: List directory structure
+      run: |
+        echo "Current directory: $(pwd)"
+        ls -la
+        echo "Scraper directory:"
+        ls -la Scraper || echo "Scraper directory not found"
+      
     - name: Run scraper
       env:
         DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
-      run: python Scraper/jobs_scraper.py
+      run: |
+        # Zjistíme, kde přesně je soubor jobs_scraper.py
+        find . -name "jobs_scraper.py" -type f
+        
+        # Spustíme skript s absolutní cestou
+        python jobs_scraper.py
       
     - name: Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: scraper-logs
-        path: scraper.log
+        path: |
+          scraper.log
+          */scraper.log
         retention-days: 7
 
     - name: Clean up credentials
