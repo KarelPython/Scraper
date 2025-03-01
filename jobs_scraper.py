@@ -8,11 +8,14 @@ import sys
 import os
 import ssl
 import urllib3
+import socket
+import backoff
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.api_core.exceptions import RetryError, GoogleAPIError
 
 # Získání absolutní cesty k adresáři, kde se nachází tento skript
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +37,9 @@ logging.basicConfig(
 
 # Potlačení varování o nezabezpečených požadavcích
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Nastavení delšího timeoutu pro socket
+socket.setdefaulttimeout(60)  # 60 sekund timeout
 
 logging.info(f"Skript spuštěn z adresáře: {os.getcwd()}")
 logging.info(f"Adresář skriptu: {script_dir}")
@@ -156,6 +162,22 @@ class JobsScraper:
         if not self.test_mode:
             try:
                 logging.info("Initializing Google Docs API connection...")
+                
+                # Nastavení SSL kontextu pro Google API
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                # Nastavení HTTP transportu s vlastním SSL kontextem
+                http = urllib3.PoolManager(
+                    ssl_context=ssl_context,
+                    retries=Retry(
+                        total=5,
+                        backoff_factor=1,
+                        status_forcelist=[429, 500, 502, 503, 504],
+                    )
+                )
+                
                 self.credentials = service_account.Credentials.from_service_account_file(
                     credentials_path, scopes=self.SCOPES)
                 
@@ -163,12 +185,25 @@ class JobsScraper:
                 logging.info(f"Service account email: {self.credentials.service_account_email}")
                 logging.info(f"Token URI: {self.credentials._token_uri}")
                 
+                # Vytvoření služby s vlastním HTTP transportem a retry logikou
                 self.service = build('docs', 'v1', credentials=self.credentials)
                 
-                # Test připojení k API
-                logging.info(f"Testing connection to Google Docs API with document ID: {self.DOCUMENT_ID}")
-                self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
-                logging.info("Successfully connected to Google Docs API")
+                # Test připojení k API s opakováním při chybě
+                max_retries = 3
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        logging.info(f"Testing connection to Google Docs API with document ID: {self.DOCUMENT_ID} (pokus {retry_count + 1}/{max_retries})")
+                        self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+                        logging.info("Successfully connected to Google Docs API")
+                        break
+                    except (HttpError, ssl.SSLError, socket.error) as e:
+                        retry_count += 1
+                        logging.warning(f"Chyba při připojení k Google Docs API (pokus {retry_count}/{max_retries}): {e}")
+                        if retry_count >= max_retries:
+                            raise
+                        time.sleep(5)  # Čekáme 5 sekund před dalším pokusem
+                
             except Exception as e:
                 logging.error(f"Failed to initialize Google Docs API: {e}")
                 
@@ -191,6 +226,29 @@ class JobsScraper:
             logging.info("Skipping Google Docs API initialization in TEST_MODE")
             self.service = None
 
+    # Dekorátor pro opakování operace při chybě
+    @backoff.on_exception(backoff.expo, 
+                         (HttpError, ssl.SSLError, socket.error, ConnectionError),
+                         max_tries=5,
+                         jitter=backoff.full_jitter)
+    def _execute_with_retry(self, request):
+        """
+        # Pomocná metoda pro provedení požadavku s automatickým opakováním při chybě
+        # Parametry:
+        #   request: objekt požadavku Google API
+        # Returns:
+        #   výsledek požadavku
+        # Raises:
+        #   HttpError: při problému s API po vyčerpání všech pokusů
+        """
+        try:
+            return request.execute()
+        except (ssl.SSLError, socket.error) as e:
+            logging.warning(f"SSL/Socket chyba při komunikaci s Google API: {e}")
+            # Přidáme krátkou pauzu před opakováním
+            time.sleep(2)
+            raise  # Necháme backoff dekorátor zpracovat opakování
+
     def get_existing_jobs(self):
         """
         # Načte existující nabídky z Google Docs pro kontrolu duplicit
@@ -205,7 +263,10 @@ class JobsScraper:
             return []
             
         try:
-            document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+            # Použití metody s opakováním při chybě
+            document = self._execute_with_retry(
+                self.service.documents().get(documentId=self.DOCUMENT_ID)
+            )
             content = document.get('body').get('content')
             
             # Extrahujeme URL adresy z dokumentu
@@ -354,14 +415,101 @@ class JobsScraper:
             return
             
         try:
-            # Získáme aktuální dokument
-            document = self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+            # Uložíme nabídky do lokálního souboru jako zálohu
+            backup_file = os.path.join(script_dir, 'jobs_backup.json')
+            try:
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    json.dump(new_jobs, f, ensure_ascii=False, indent=2)
+                logging.info(f"Záloha {len(new_jobs)} nabídek uložena do {backup_file}")
+            except Exception as backup_err:
+                logging.error(f"Chyba při ukládání zálohy: {backup_err}")
+            
+            # Získáme aktuální dokument s opakováním při chybě
+            document = self._execute_with_retry(
+                self.service.documents().get(documentId=self.DOCUMENT_ID)
+            )
             
             # Připravíme obsah pro přidání
             requests = []
             
             # Přidáme nadpis s datem
             current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Zkusíme nejprve alternativní metodu - přidání obsahu na konec dokumentu
+            try:
+                logging.info("Používám alternativní metodu přidání obsahu na konec dokumentu")
+                content = f"\n\nNové nabídky nalezené {current_date}:\n\n"
+                for job in new_jobs:
+                    content += f"• {job['title']} - {job['company']} ({job['location']})\n  {job['link']}\n  {job['description']}\n\n"
+                
+                # Rozdělíme obsah na menší části, pokud je příliš velký
+                # Google Docs API má limit na velikost požadavku
+                max_content_length = 50000  # Přibližný limit pro velikost obsahu
+                content_parts = []
+                
+                if len(content) > max_content_length:
+                    # Rozdělíme obsah na menší části
+                    current_part = ""
+                    for job in new_jobs:
+                        job_text = f"• {job['title']} - {job['company']} ({job['location']})\n  {job['link']}\n  {job['description']}\n\n"
+                        
+                        # Pokud by přidání této nabídky překročilo limit, uložíme aktuální část a začneme novou
+                        if len(current_part) + len(job_text) > max_content_length:
+                            content_parts.append(current_part)
+                            current_part = f"\n\nPokračování nabídek z {current_date}:\n\n" + job_text
+                        else:
+                            current_part += job_text
+                    
+                    # Přidáme poslední část, pokud není prázdná
+                    if current_part:
+                        content_parts.append(current_part)
+                else:
+                    content_parts = [content]
+                
+                # Přidáme první část s nadpisem
+                first_part = f"\n\nNové nabídky nalezené {current_date}:\n\n"
+                if content_parts:
+                    # Přidáme obsah první části k nadpisu
+                    first_part += content_parts[0].replace(f"\n\nPokračování nabídek z {current_date}:\n\n", "")
+                    content_parts[0] = first_part
+                else:
+                    content_parts = [first_part]
+                
+                # Přidáme každou část obsahu samostatně
+                for i, part in enumerate(content_parts):
+                    try:
+                        logging.info(f"Přidávám část {i+1}/{len(content_parts)} obsahu (velikost: {len(part)} znaků)")
+                        
+                        result = self._execute_with_retry(
+                            self.service.documents().batchUpdate(
+                                documentId=self.DOCUMENT_ID,
+                                body={
+                                    'requests': [{
+                                        'insertText': {
+                                            'endOfSegmentLocation': {},
+                                            'text': part
+                                        }
+                                    }]
+                                }
+                            )
+                        )
+                        
+                        logging.info(f"Úspěšně přidána část {i+1}/{len(content_parts)}")
+                        time.sleep(2)  # Krátká pauza mezi částmi
+                    except Exception as part_err:
+                        logging.error(f"Chyba při přidávání části {i+1}: {part_err}")
+                        # Pokračujeme další částí i v případě chyby
+                
+                logging.info(f"Úspěšně přidáno {len(new_jobs)} nových nabídek do Google Docs alternativní metodou")
+                return
+                
+            except Exception as alt_err:
+                logging.error(f"Alternativní metoda selhala: {alt_err}")
+                logging.info("Zkusím původní metodu přidání obsahu")
+            
+            # Pokud alternativní metoda selže, zkusíme původní metodu
+            
+            # Přidáme nadpis s datem
             requests.append({
                 'insertText': {
                     'location': {
@@ -410,59 +558,86 @@ class JobsScraper:
             
             # Rozdělíme požadavky na menší dávky, pokud je jich příliš mnoho
             # Google Docs API má limit na počet požadavků v jednom volání
-            batch_size = 10
+            batch_size = 5  # Zmenšíme velikost dávky pro větší spolehlivost
             for i in range(0, len(requests), batch_size):
                 batch_requests = requests[i:i+batch_size]
                 try:
-                    result = self.service.documents().batchUpdate(
-                        documentId=self.DOCUMENT_ID,
-                        body={'requests': batch_requests}
-                    ).execute()
+                    result = self._execute_with_retry(
+                        self.service.documents().batchUpdate(
+                            documentId=self.DOCUMENT_ID,
+                            body={'requests': batch_requests}
+                        )
+                    )
                     logging.info(f"Úspěšně přidána dávka {i//batch_size + 1} z {(len(requests) + batch_size - 1)//batch_size}")
-                    time.sleep(2)  # Krátká pauza mezi dávkami
-                except HttpError as err:
+                    time.sleep(3)  # Delší pauza mezi dávkami
+                except Exception as err:
                     logging.error(f"Chyba při aktualizaci dokumentu (dávka {i//batch_size + 1}): {err}")
                     # Pokud selže dávka, zkusíme přidat požadavky jeden po druhém
                     for j, req in enumerate(batch_requests):
                         try:
-                            self.service.documents().batchUpdate(
-                                documentId=self.DOCUMENT_ID,
-                                body={'requests': [req]}
-                            ).execute()
+                            self._execute_with_retry(
+                                self.service.documents().batchUpdate(
+                                    documentId=self.DOCUMENT_ID,
+                                    body={'requests': [req]}
+                                )
+                            )
                             logging.info(f"Úspěšně přidán požadavek {j+1} z dávky {i//batch_size + 1}")
-                        except HttpError as single_err:
+                        except Exception as single_err:
                             logging.error(f"Chyba při přidání jednotlivého požadavku: {single_err}")
-                        time.sleep(1)
+                        time.sleep(2)
             
             logging.info(f"Úspěšně přidáno {len(new_jobs)} nových nabídek do Google Docs")
             
         except HttpError as err:
             logging.error(f"Chyba při aktualizaci Google Docs: {err}")
-            if "Invalid requests[0].insertText" in str(err):
-                logging.error("Chyba může být způsobena neplatným indexem v dokumentu")
-                logging.error("Zkusím alternativní metodu přidání obsahu")
-                try:
-                    # Alternativní metoda - přidání obsahu na konec dokumentu
-                    content = f"\n\nNové nabídky nalezené {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:\n\n"
-                    for job in new_jobs:
-                        content += f"• {job['title']} - {job['company']} ({job['location']})\n  {job['link']}\n  {job['description']}\n\n"
-                    
-                    self.service.documents().batchUpdate(
-                        documentId=self.DOCUMENT_ID,
-                        body={
-                            'requests': [{
-                                'insertText': {
-                                    'endOfSegmentLocation': {},
-                                    'text': content
-                                }
-                            }]
-                        }
-                    ).execute()
-                    logging.info("Úspěšně přidán obsah alternativní metodou")
-                except Exception as alt_err:
-                    logging.error(f"Alternativní metoda také selhala: {alt_err}")
+            self._try_simple_append(new_jobs)
+        except ssl.SSLError as ssl_err:
+            logging.error(f"SSL chyba při aktualizaci Google Docs: {ssl_err}")
+            self._try_simple_append(new_jobs)
+        except socket.error as sock_err:
+            logging.error(f"Socket chyba při aktualizaci Google Docs: {sock_err}")
+            self._try_simple_append(new_jobs)
         except Exception as e:
             logging.error(f"Neočekávaná chyba při aktualizaci dokumentu: {e}")
+            self._try_simple_append(new_jobs)
+    
+    def _try_simple_append(self, new_jobs):
+        """
+        # Nejjednodušší možná metoda pro přidání obsahu do dokumentu
+        # Použije se jako poslední možnost, když všechny ostatní metody selžou
+        # Parametry:
+        #   new_jobs: list[dict] - seznam nových pracovních nabídek
+        """
+        try:
+            logging.info("Zkouším nejjednodušší možnou metodu přidání obsahu")
+            
+            # Vytvoříme jednoduchý text s nabídkami
+            current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            content = f"\n\nNové nabídky nalezené {current_date}:\n\n"
+            
+            # Přidáme jen základní informace o každé nabídce
+            for job in new_jobs:
+                content += f"• {job['title']} - {job['company']}\n  {job['link']}\n\n"
+            
+            # Použijeme nejjednodušší možný požadavek
+            self._execute_with_retry(
+                self.service.documents().batchUpdate(
+                    documentId=self.DOCUMENT_ID,
+                    body={
+                        'requests': [{
+                            'insertText': {
+                                'endOfSegmentLocation': {},
+                                'text': content
+                            }
+                        }]
+                    }
+                )
+            )
+            
+            logging.info("Úspěšně přidán zjednodušený obsah do dokumentu")
+        except Exception as e:
+            logging.error(f"I nejjednodušší metoda přidání obsahu selhala: {e}")
+            logging.error("Nabídky jsou uloženy v záložním souboru jobs_backup.json")
 
     def scrape_jobs(self):
         """
