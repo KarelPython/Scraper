@@ -23,7 +23,9 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 
 # Kontrola, zda jsme v testovacím režimu
-TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
+TEST_MODE = (os.environ.get('TEST_MODE', 'false').lower() == 'true')
+logging.info(f"TEST_MODE z prostředí: {os.environ.get('TEST_MODE', 'není nastaveno')}")
+logging.info(f"TEST_MODE hodnota: {TEST_MODE}")
 
 # Nastavení logování pro sledování průběhu scrapování a případných chyb
 logging.basicConfig(
@@ -134,7 +136,11 @@ class JobsScraper:
         self.locations = locations_with_radius
         self.keyword = "python"  # Fixní hledaný výraz
         self.jobs_data = []
+        
+        # Nastavení testovacího režimu - přebíráme hodnotu z globální proměnné
+        global TEST_MODE
         self.test_mode = TEST_MODE
+        logging.info(f"Inicializace JobsScraper s test_mode: {self.test_mode}")
         
         # Nastavení session pro requests s retry logikou
         self.session = requests.Session()
@@ -221,7 +227,12 @@ class JobsScraper:
                     logging.error("3. Zkontrolujte, zda je ID dokumentu správné")
                     logging.error("4. Vygenerujte nové credentials pro service account")
                 
-                sys.exit(1)
+                # V testovacím režimu pokračujeme i při chybě inicializace API
+                if not self.test_mode:
+                    sys.exit(1)
+                else:
+                    logging.warning("Continuing in TEST_MODE despite Google Docs API initialization error")
+                    self.service = None
         else:
             logging.info("Skipping Google Docs API initialization in TEST_MODE")
             self.service = None
@@ -376,68 +387,399 @@ class JobsScraper:
             # Extrakce všech dostupných informací
             details = {}
             
-            # Extrakce názvu pozice
-            title_element = soup.find('h1', class_="Typography--heading1")
+            # Extrakce názvu pozice - zkusíme více možných selektorů
+            title_element = None
+            title_selectors = [
+                ('h1', {"class_": "Typography--heading1"}),
+                ('h1', {}),
+                ('h1', {"class_": "jobad__title"}),
+                ('h1', {"class_": "jobad-title"}),
+                ('div', {"class_": "jobad__header"}),
+                ('div', {"data-test": "jobad-title"})
+            ]
+            
+            for tag, attrs in title_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        title_element = element
+                        break
+                if title_element:
+                    break
+            
             details['title'] = title_element.text.strip() if title_element else "Neznámý název pozice"
+            logging.info(f"Nalezen název pozice: {details['title']}")
             
-            # Extrakce informací o společnosti
-            company_element = soup.find('a', class_="Typography--link")
+            # Extrakce informací o společnosti - zkusíme více možných selektorů
+            company_element = None
+            company_selectors = [
+                ('a', {"class_": "Typography--link"}),
+                ('div', {"data-test": "jd-company-name"}),
+                ('div', {"class_": "jobad__company"}),
+                ('span', {"class_": "jobad__company-name"}),
+                ('div', {"class_": "company-name"})
+            ]
+            
+            for tag, attrs in company_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        company_element = element
+                        break
+                if company_element:
+                    break
+                    
+            # Pokud jsme nenašli společnost podle selektorů, zkusíme najít podle textu
+            if not company_element:
+                company_labels = soup.find_all(string=lambda text: text and ('Společnost:' in text or 'Firma:' in text))
+                for label in company_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        company_element = next_element
+                        break
+            
             details['company'] = company_element.text.strip() if company_element else "Neznámá společnost"
+            logging.info(f"Nalezena společnost: {details['company']}")
             
-            # Extrakce lokality
-            location_element = soup.find('span', class_="Typography--bodyMedium")
+            # Extrakce lokality - zkusíme více možných selektorů
+            location_element = None
+            location_selectors = [
+                ('span', {"class_": "Typography--bodyMedium"}),
+                ('div', {"data-test": "jd-locality"}),
+                ('div', {"class_": "jobad__location"}),
+                ('span', {"class_": "jobad__location"}),
+                ('div', {"class_": "location"})
+            ]
+            
+            for tag, attrs in location_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        # Kontrola, zda text obsahuje typické znaky pro lokalitu
+                        text = element.text.strip().lower()
+                        if any(city in text for city in ['praha', 'brno', 'ostrava', 'plzeň', 'liberec', 'olomouc', 'české', 'hradec']):
+                            location_element = element
+                            break
+                if location_element:
+                    break
+                    
+            # Pokud jsme nenašli lokalitu podle selektorů, zkusíme najít podle textu
+            if not location_element:
+                location_labels = soup.find_all(string=lambda text: text and ('Lokalita:' in text or 'Místo výkonu práce:' in text))
+                for label in location_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        location_element = next_element
+                        break
+            
             details['location'] = location_element.text.strip() if location_element else "Neznámá lokalita"
+            logging.info(f"Nalezena lokalita: {details['location']}")
             
-            # Extrakce platu
-            salary_element = soup.find('div', {'data-test': 'jd-salary'})
+            # Extrakce platu - zkusíme více možných selektorů
+            salary_element = None
+            salary_selectors = [
+                ('div', {"data-test": "jd-salary"}),
+                ('div', {"class_": "jobad__salary"}),
+                ('span', {"class_": "jobad__salary"}),
+                ('div', {"class_": "salary"})
+            ]
+            
+            for tag, attrs in salary_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        # Kontrola, zda text obsahuje typické znaky pro plat
+                        text = element.text.strip().lower()
+                        if any(currency in text for currency in ['kč', 'czk', ',-', 'měsíčně', 'plat']):
+                            salary_element = element
+                            break
+                if salary_element:
+                    break
+                    
+            # Pokud jsme nenašli plat podle selektorů, zkusíme najít podle textu
+            if not salary_element:
+                salary_labels = soup.find_all(string=lambda text: text and ('Plat:' in text or 'Mzda:' in text))
+                for label in salary_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        salary_element = next_element
+                        break
+            
             details['salary'] = salary_element.text.strip() if salary_element else "Neuvedeno"
+            logging.info(f"Nalezen plat: {details['salary']}")
+            
+            # Extrakce popisu pozice - zkusíme více možných selektorů
+            description_element = None
+            description_selectors = [
+                ('div', {"data-test": "jd-body-richtext"}),
+                ('div', {"class_": "Typography--bodyLarge"}),
+                ('div', {"class_": "jobad__body"}),
+                ('div', {"class_": "jobad-description"}),
+                ('div', {"class_": "description"})
+            ]
+            
+            for tag, attrs in description_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip() and len(element.text.strip()) > 100:
+                        description_element = element
+                        break
+                if description_element:
+                    break
+                    
+            # Pokud jsme nenašli popis podle selektorů, zkusíme najít podle textu
+            if not description_element:
+                description_labels = soup.find_all(string=lambda text: text and ('Náplň práce:' in text or 'Popis pozice:' in text))
+                for label in description_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        description_element = next_element
+                        break
+                        
+            # Pokud stále nemáme popis, zkusíme najít jakýkoliv dlouhý text v dokumentu
+            if not description_element:
+                paragraphs = soup.find_all('p')
+                for p in paragraphs:
+                    if p and p.text.strip() and len(p.text.strip()) > 100:
+                        description_element = p
+                        break
+            
+            details['description'] = description_element.text.strip() if description_element else "Neuvedeno"
+            if len(details['description']) > 1000:
+                logging.info(f"Nalezen popis pozice (zkráceno): {details['description'][:100]}...")
+            else:
+                logging.info(f"Nalezen popis pozice: {details['description']}")
+            
+            # Extrakce požadavků - zkusíme více možných selektorů
+            requirements_element = None
+            requirements_selectors = [
+                ('div', {"data-test": "jd-requirements-richtext"}),
+                ('div', {"class_": "jobad__requirements"}),
+                ('div', {"class_": "requirements"})
+            ]
+            
+            for tag, attrs in requirements_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        requirements_element = element
+                        break
+                if requirements_element:
+                    break
+                    
+            # Pokud jsme nenašli požadavky podle selektorů, zkusíme najít podle textu
+            if not requirements_element:
+                requirements_labels = soup.find_all(string=lambda text: text and ('Požadavky:' in text or 'Požadujeme:' in text))
+                for label in requirements_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        requirements_element = next_element
+                        break
+            
+            details['requirements'] = requirements_element.text.strip() if requirements_element else "Neuvedeno"
+            if requirements_element:
+                logging.info(f"Nalezeny požadavky: {details['requirements'][:100]}...")
             
             # Extrakce typu úvazku
-            job_type_element = soup.find('div', {'data-test': 'jd-employment'})
+            job_type_element = None
+            job_type_selectors = [
+                ('div', {"data-test": "jd-employment"}),
+                ('div', {"class_": "jobad__employment"}),
+                ('div', {"class_": "employment-type"})
+            ]
+            
+            for tag, attrs in job_type_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        job_type_element = element
+                        break
+                if job_type_element:
+                    break
+                    
+            # Pokud jsme nenašli typ úvazku podle selektorů, zkusíme najít podle textu
+            if not job_type_element:
+                job_type_labels = soup.find_all(string=lambda text: text and ('Úvazek:' in text or 'Typ práce:' in text))
+                for label in job_type_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        job_type_element = next_element
+                        break
+            
             details['job_type'] = job_type_element.text.strip() if job_type_element else "Neuvedeno"
+            if job_type_element:
+                logging.info(f"Nalezen typ úvazku: {details['job_type']}")
             
             # Extrakce požadovaného vzdělání
-            education_element = soup.find('div', {'data-test': 'jd-education'})
+            education_element = None
+            education_selectors = [
+                ('div', {"data-test": "jd-education"}),
+                ('div', {"class_": "jobad__education"}),
+                ('div', {"class_": "education"})
+            ]
+            
+            for tag, attrs in education_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        education_element = element
+                        break
+                if education_element:
+                    break
+                    
+            # Pokud jsme nenašli vzdělání podle selektorů, zkusíme najít podle textu
+            if not education_element:
+                education_labels = soup.find_all(string=lambda text: text and ('Vzdělání:' in text or 'Požadované vzdělání:' in text))
+                for label in education_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        education_element = next_element
+                        break
+            
             details['education'] = education_element.text.strip() if education_element else "Neuvedeno"
+            if education_element:
+                logging.info(f"Nalezeno požadované vzdělání: {details['education']}")
             
             # Extrakce požadovaných jazyků
-            languages_element = soup.find('div', {'data-test': 'jd-languages'})
+            languages_element = None
+            languages_selectors = [
+                ('div', {"data-test": "jd-languages"}),
+                ('div', {"class_": "jobad__languages"}),
+                ('div', {"class_": "languages"})
+            ]
+            
+            for tag, attrs in languages_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        languages_element = element
+                        break
+                if languages_element:
+                    break
+                    
+            # Pokud jsme nenašli jazyky podle selektorů, zkusíme najít podle textu
+            if not languages_element:
+                languages_labels = soup.find_all(string=lambda text: text and ('Jazyky:' in text or 'Požadované jazyky:' in text))
+                for label in languages_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        languages_element = next_element
+                        break
+            
             details['languages'] = languages_element.text.strip() if languages_element else "Neuvedeno"
+            if languages_element:
+                logging.info(f"Nalezeny požadované jazyky: {details['languages']}")
             
-            # Extrakce benefitů
-            benefits_elements = soup.find_all('div', class_="Benefit")
+            # Extrakce benefitů - zkusíme více možných selektorů
             benefits = []
-            for benefit in benefits_elements:
-                benefit_text = benefit.text.strip()
-                if benefit_text:
-                    benefits.append(benefit_text)
+            benefits_elements = soup.find_all('div', class_="Benefit")
+            if benefits_elements:
+                for benefit in benefits_elements:
+                    benefit_text = benefit.text.strip()
+                    if benefit_text:
+                        benefits.append(benefit_text)
+                        
+            # Pokud jsme nenašli benefity podle třídy, zkusíme najít podle textu
+            if not benefits:
+                benefits_section = None
+                benefits_headers = soup.find_all(string=lambda text: text and ('Benefity:' in text or 'Nabízíme:' in text))
+                for header in benefits_headers:
+                    parent = header.parent
+                    benefits_section = parent.find_next('ul')
+                    if benefits_section:
+                        for li in benefits_section.find_all('li'):
+                            benefit_text = li.text.strip()
+                            if benefit_text:
+                                benefits.append(benefit_text)
+                        break
+            
             details['benefits'] = benefits if benefits else ["Neuvedeno"]
+            if benefits:
+                logging.info(f"Nalezeno {len(benefits)} benefitů")
             
-            # Extrakce popisu pozice
-            description_element = soup.find('div', {'data-test': 'jd-body-richtext'})
-            if description_element:
-                details['description'] = description_element.text.strip()
-            else:
-                # Alternativní hledání popisu
-                description_element = soup.find('div', class_="Typography--bodyLarge")
-                details['description'] = description_element.text.strip() if description_element else "Bez popisu"
+            # Extrakce informací o společnosti - zkusíme více možných selektorů
+            about_company_element = None
+            about_company_selectors = [
+                ('div', {"data-test": "jd-about-company-richtext"}),
+                ('div', {"class_": "jobad__about-company"}),
+                ('div', {"class_": "about-company"})
+            ]
             
-            # Extrakce požadavků
-            requirements_element = soup.find('div', {'data-test': 'jd-requirements-richtext'})
-            details['requirements'] = requirements_element.text.strip() if requirements_element else "Neuvedeno"
+            for tag, attrs in about_company_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        about_company_element = element
+                        break
+                if about_company_element:
+                    break
+                    
+            # Pokud jsme nenašli informace o společnosti podle selektorů, zkusíme najít podle textu
+            if not about_company_element:
+                about_company_labels = soup.find_all(string=lambda text: text and ('O společnosti:' in text or 'O firmě:' in text))
+                for label in about_company_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        about_company_element = next_element
+                        break
             
-            # Extrakce informací o společnosti
-            about_company_element = soup.find('div', {'data-test': 'jd-about-company-richtext'})
             details['about_company'] = about_company_element.text.strip() if about_company_element else "Neuvedeno"
+            if about_company_element:
+                logging.info(f"Nalezeny informace o společnosti: {details['about_company'][:100]}...")
             
-            # Extrakce data zveřejnění
-            date_element = soup.find('div', {'data-test': 'jd-posted-date'})
+            # Extrakce data zveřejnění - zkusíme více možných selektorů
+            date_element = None
+            date_selectors = [
+                ('div', {"data-test": "jd-posted-date"}),
+                ('div', {"class_": "jobad__posted-date"}),
+                ('div', {"class_": "posted-date"})
+            ]
+            
+            for tag, attrs in date_selectors:
+                elements = soup.find_all(tag, attrs)
+                for element in elements:
+                    if element and element.text.strip():
+                        date_element = element
+                        break
+                if date_element:
+                    break
+                    
+            # Pokud jsme nenašli datum podle selektorů, zkusíme najít podle textu
+            if not date_element:
+                date_labels = soup.find_all(string=lambda text: text and ('Datum zveřejnění:' in text or 'Zveřejněno:' in text))
+                for label in date_labels:
+                    parent = label.parent
+                    next_element = parent.find_next()
+                    if next_element and next_element.text.strip():
+                        date_element = next_element
+                        break
+            
             details['posted_date'] = date_element.text.strip() if date_element else "Neuvedeno"
+            if date_element:
+                logging.info(f"Nalezeno datum zveřejnění: {details['posted_date']}")
+            
+            # Kontrola a čištění dat
+            for key, value in details.items():
+                if isinstance(value, str):
+                    # Odstranění nadbytečných bílých znaků
+                    details[key] = ' '.join(value.split())
+                    # Kontrola prázdných hodnot
+                    if not details[key] or details[key].lower() in ['neuvedeno', 'neznámý', 'neznámá', 'neznámé']:
+                        details[key] = "Neuvedeno"
             
             # Omezení délky dlouhých textů
             for key in ['description', 'requirements', 'about_company']:
-                if len(details.get(key, "")) > 1000:
-                    details[key] = details[key][:1000] + "..."
+                if len(details.get(key, "")) > 2000:
+                    details[key] = details[key][:2000] + "..."
             
             logging.info(f"Úspěšně staženy detaily nabídky: {url}")
             return details
@@ -491,34 +833,51 @@ class JobsScraper:
             try:
                 logging.info("Používám alternativní metodu přidání obsahu na konec dokumentu")
                 content = f"\n\nNové nabídky nalezené {current_date}:\n\n"
+                
+                # Formátování jednotlivých nabídek
                 for job in new_jobs:
-                    content += f"• {job.get('title', 'Neznámý název')} - {job.get('company', 'Neznámá společnost')}\n"
-                    content += f"  {job.get('link', '')}\n"
-                    content += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
-                    content += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
-                    content += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
-                    content += f"  Vzdělání: {job.get('education', 'Neuvedeno')}\n"
-                    content += f"  Jazyky: {job.get('languages', 'Neuvedeno')}\n"
-                    content += f"  Datum zveřejnění: {job.get('posted_date', 'Neuvedeno')}\n"
+                    # Základní informace o nabídce
+                    job_text = f"• {job.get('title', 'Neznámý název')} - {job.get('company', 'Neznámá společnost')}\n"
+                    job_text += f"  {job.get('link', '')}\n"
+                    job_text += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
+                    
+                    # Plat a typ úvazku
+                    if job.get('salary', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
+                    if job.get('job_type', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
+                    
+                    # Vzdělání a jazyky
+                    if job.get('education', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"  Vzdělání: {job.get('education', 'Neuvedeno')}\n"
+                    if job.get('languages', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"  Jazyky: {job.get('languages', 'Neuvedeno')}\n"
+                    
+                    # Datum zveřejnění
+                    if job.get('posted_date', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"  Datum zveřejnění: {job.get('posted_date', 'Neuvedeno')}\n"
                     
                     # Přidání benefitů
                     benefits = job.get('benefits', [])
                     if benefits and benefits != ["Neuvedeno"]:
-                        content += f"  Benefity: {', '.join(benefits)}\n"
+                        job_text += f"\n  Benefity:\n"
+                        for benefit in benefits:
+                            job_text += f"  • {benefit}\n"
                     
                     # Přidání popisu
-                    if job.get('description', '') != "Neuvedeno":
-                        content += f"\n  Popis pozice:\n  {job.get('description', '')}\n"
+                    if job.get('description', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"\n  Popis pozice:\n  {job.get('description', '')}\n"
                     
                     # Přidání požadavků
-                    if job.get('requirements', '') != "Neuvedeno":
-                        content += f"\n  Požadavky:\n  {job.get('requirements', '')}\n"
+                    if job.get('requirements', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"\n  Požadavky:\n  {job.get('requirements', '')}\n"
                     
                     # Přidání informací o společnosti
-                    if job.get('about_company', '') != "Neuvedeno":
-                        content += f"\n  O společnosti:\n  {job.get('about_company', '')}\n"
+                    if job.get('about_company', 'Neuvedeno') != "Neuvedeno":
+                        job_text += f"\n  O společnosti:\n  {job.get('about_company', '')}\n"
                     
-                    content += "\n\n"
+                    job_text += "\n\n"
+                    content += job_text
                 
                 # Rozdělíme obsah na menší části, pokud je příliš velký
                 # Google Docs API má limit na velikost požadavku
@@ -526,13 +885,50 @@ class JobsScraper:
                 content_parts = []
                 
                 if len(content) > max_content_length:
-                    # Rozdělíme obsah na menší části
-                    current_part = ""
+                    # Rozdělíme obsah na menší části podle jednotlivých nabídek
+                    current_part = f"\n\nNové nabídky nalezené {current_date}:\n\n"
                     for job in new_jobs:
+                        # Vytvoříme text pro aktuální nabídku
                         job_text = f"• {job.get('title', 'Neznámý název')} - {job.get('company', 'Neznámá společnost')}\n"
                         job_text += f"  {job.get('link', '')}\n"
                         job_text += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
-                        job_text += f"  Plat: {job.get('salary', 'Neuvedeno')}\n\n"
+                        
+                        # Plat a typ úvazku
+                        if job.get('salary', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
+                        if job.get('job_type', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
+                        
+                        # Vzdělání a jazyky
+                        if job.get('education', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"  Vzdělání: {job.get('education', 'Neuvedeno')}\n"
+                        if job.get('languages', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"  Jazyky: {job.get('languages', 'Neuvedeno')}\n"
+                        
+                        # Datum zveřejnění
+                        if job.get('posted_date', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"  Datum zveřejnění: {job.get('posted_date', 'Neuvedeno')}\n"
+                        
+                        # Přidání benefitů
+                        benefits = job.get('benefits', [])
+                        if benefits and benefits != ["Neuvedeno"]:
+                            job_text += f"\n  Benefity:\n"
+                            for benefit in benefits:
+                                job_text += f"  • {benefit}\n"
+                        
+                        # Přidání popisu
+                        if job.get('description', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"\n  Popis pozice:\n  {job.get('description', '')}\n"
+                        
+                        # Přidání požadavků
+                        if job.get('requirements', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"\n  Požadavky:\n  {job.get('requirements', '')}\n"
+                        
+                        # Přidání informací o společnosti
+                        if job.get('about_company', 'Neuvedeno') != "Neuvedeno":
+                            job_text += f"\n  O společnosti:\n  {job.get('about_company', '')}\n"
+                        
+                        job_text += "\n\n"
                         
                         # Pokud by přidání této nabídky překročilo limit, uložíme aktuální část a začneme novou
                         if len(current_part) + len(job_text) > max_content_length:
@@ -547,33 +943,24 @@ class JobsScraper:
                 else:
                     content_parts = [content]
                 
-                # Přidáme první část s nadpisem
-                first_part = f"\n\nNové nabídky nalezené {current_date}:\n\n"
-                if content_parts:
-                    # Přidáme obsah první části k nadpisu
-                    first_part += content_parts[0].replace(f"\n\nPokračování nabídek z {current_date}:\n\n", "")
-                    content_parts[0] = first_part
-                else:
-                    content_parts = [first_part]
-                
                 # Přidáme každou část obsahu samostatně
                 for i, part in enumerate(content_parts):
                     try:
                         logging.info(f"Přidávám část {i+1}/{len(content_parts)} obsahu (velikost: {len(part)} znaků)")
                         
-                        result = self._execute_with_retry(
-                            self.service.documents().batchUpdate(
-                                documentId=self.DOCUMENT_ID,
-                                body={
-                                    'requests': [{
-                                        'insertText': {
-                                            'endOfSegmentLocation': {},
-                                            'text': part
-                                        }
-                                    }]
-                                }
-                            )
+                        request = self.service.documents().batchUpdate(
+                            documentId=self.DOCUMENT_ID,
+                            body={
+                                'requests': [{
+                                    'insertText': {
+                                        'endOfSegmentLocation': {},
+                                        'text': part
+                                    }
+                                }]
+                            }
                         )
+                        
+                        self._execute_with_retry(request)
                         
                         logging.info(f"Úspěšně přidána část {i+1}/{len(content_parts)}")
                         time.sleep(2)  # Krátká pauza mezi částmi
@@ -621,30 +1008,44 @@ class JobsScraper:
             
             # Přidáme jednotlivé nabídky
             for job in new_jobs:
+                # Základní informace o nabídce
                 job_text = f"\n• {job.get('title', 'Neznámý název')} - {job.get('company', 'Neznámá společnost')}\n"
                 job_text += f"  {job.get('link', '')}\n"
                 job_text += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
-                job_text += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
-                job_text += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
-                job_text += f"  Vzdělání: {job.get('education', 'Neuvedeno')}\n"
-                job_text += f"  Jazyky: {job.get('languages', 'Neuvedeno')}\n"
-                job_text += f"  Datum zveřejnění: {job.get('posted_date', 'Neuvedeno')}\n"
+                
+                # Plat a typ úvazku
+                if job.get('salary', 'Neuvedeno') != "Neuvedeno":
+                    job_text += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
+                if job.get('job_type', 'Neuvedeno') != "Neuvedeno":
+                    job_text += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
+                
+                # Vzdělání a jazyky
+                if job.get('education', 'Neuvedeno') != "Neuvedeno":
+                    job_text += f"  Vzdělání: {job.get('education', 'Neuvedeno')}\n"
+                if job.get('languages', 'Neuvedeno') != "Neuvedeno":
+                    job_text += f"  Jazyky: {job.get('languages', 'Neuvedeno')}\n"
+                
+                # Datum zveřejnění
+                if job.get('posted_date', 'Neuvedeno') != "Neuvedeno":
+                    job_text += f"  Datum zveřejnění: {job.get('posted_date', 'Neuvedeno')}\n"
                 
                 # Přidání benefitů
                 benefits = job.get('benefits', [])
                 if benefits and benefits != ["Neuvedeno"]:
-                    job_text += f"  Benefity: {', '.join(benefits)}\n"
+                    job_text += f"\n  Benefity:\n"
+                    for benefit in benefits:
+                        job_text += f"  • {benefit}\n"
                 
                 # Přidání popisu
-                if job.get('description', '') != "Neuvedeno":
+                if job.get('description', 'Neuvedeno') != "Neuvedeno":
                     job_text += f"\n  Popis pozice:\n  {job.get('description', '')}\n"
                 
                 # Přidání požadavků
-                if job.get('requirements', '') != "Neuvedeno":
+                if job.get('requirements', 'Neuvedeno') != "Neuvedeno":
                     job_text += f"\n  Požadavky:\n  {job.get('requirements', '')}\n"
                 
                 # Přidání informací o společnosti
-                if job.get('about_company', '') != "Neuvedeno":
+                if job.get('about_company', 'Neuvedeno') != "Neuvedeno":
                     job_text += f"\n  O společnosti:\n  {job.get('about_company', '')}\n"
                 
                 job_text += "\n"
@@ -720,31 +1121,47 @@ class JobsScraper:
             
             # Vytvoříme jednoduchý text s nabídkami
             current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            content = f"\n\nNové nabídky nalezené {current_date}:\n\n"
+            content = f"\n\nNové nabídky nalezené {current_date} (zjednodušený formát):\n\n"
             
             # Přidáme jen základní informace o každé nabídce
             for job in new_jobs:
+                # Základní informace o nabídce
                 content += f"• {job.get('title', 'Neznámý název')} - {job.get('company', 'Neznámá společnost')}\n"
                 content += f"  {job.get('link', '')}\n"
-                content += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
-                content += f"  Plat: {job.get('salary', 'Neuvedeno')}\n\n"
+                
+                # Lokalita a plat
+                if job.get('location', 'Neuvedeno') != "Neuvedeno":
+                    content += f"  Lokalita: {job.get('location', 'Neuvedeno')}\n"
+                if job.get('salary', 'Neuvedeno') != "Neuvedeno":
+                    content += f"  Plat: {job.get('salary', 'Neuvedeno')}\n"
+                
+                # Typ úvazku
+                if job.get('job_type', 'Neuvedeno') != "Neuvedeno":
+                    content += f"  Typ úvazku: {job.get('job_type', 'Neuvedeno')}\n"
+                
+                # Přidáme prázdný řádek mezi nabídkami
+                content += "\n"
             
             # Použijeme nejjednodušší možný požadavek
-            self._execute_with_retry(
-                self.service.documents().batchUpdate(
-                    documentId=self.DOCUMENT_ID,
-                    body={
-                        'requests': [{
-                            'insertText': {
-                                'endOfSegmentLocation': {},
-                                'text': content
-                            }
-                        }]
-                    }
-                )
+            request = self.service.documents().batchUpdate(
+                documentId=self.DOCUMENT_ID,
+                body={
+                    'requests': [{
+                        'insertText': {
+                            'endOfSegmentLocation': {},
+                            'text': content
+                        }
+                    }]
+                }
             )
             
+            self._execute_with_retry(request)
+            
             logging.info("Úspěšně přidán zjednodušený obsah do dokumentu")
+            
+            # Přidáme informaci o záložním souboru
+            logging.info("Kompletní detaily nabídek jsou uloženy v záložním souboru jobs_backup.json")
+            
         except Exception as e:
             logging.error(f"I nejjednodušší metoda přidání obsahu selhala: {e}")
             logging.error("Nabídky jsou uloženy v záložním souboru jobs_backup.json")

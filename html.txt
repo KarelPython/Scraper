@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Nabídka práce - Jobs.cz</title>
+</head>
+<body>
+    <h1 class="Typography--heading1">Python Developer</h1>
+    <a class="Typography--link" href="#">ABC Company</a>
+    <span class="Typography--bodyMedium">Praha</span>
+    <div data-test="jd-salary">40 000 - 60 000 Kč</div>
+    <div data-test="jd-employment">Plný úvazek</div>
+    <div data-test="jd-education">Vysokoškolské</div>
+    <div data-test="jd-languages">Angličtina (pokročilá)</div>
+    <div data-test="jd-posted-date">Zveřejněno: 1.3.2025</div>
+    
+    <div data-test="jd-body-richtext">
+        <p>Hledáme zkušeného Python vývojáře pro práci na našich backendových systémech. Budete součástí týmu, který vyvíjí a udržuje klíčové komponenty naší platformy.</p>
+        <p>Vaší hlavní náplní práce bude:</p>
+        <ul>
+            <li>Vývoj nových funkcí a vylepšení stávajících systémů</li>
+            <li>Optimalizace výkonu aplikací</li>
+            <li>Spolupráce s frontend týmem na integraci API</li>
+            <li>Code review a mentoring juniorních kolegů</li>
+        </ul>
+    </div>
+    
+    <div data-test="jd-requirements-richtext">
+        <p>Požadujeme:</p>
+        <ul>
+            <li>Minimálně 3 roky zkušeností s vývojem v Pythonu</li>
+            <li>Znalost frameworků Django nebo Flask</li>
+            <li>Zkušenosti s SQL a NoSQL databázemi</li>
+            <li>Základní znalost Docker a Kubernetes</li>
+            <li>Schopnost psát čistý, udržitelný kód</li>
+            <li>Komunikativní angličtina (denní komunikace s mezinárodním týmem)</li>
+        </ul>
+    </div>
+    
+    <div data-test="jd-about-company-richtext">
+        <p>ABC Company je přední technologická společnost zaměřená na vývoj inovativních řešení pro finanční sektor. Naše produkty používají miliony uživatelů po celém světě.</p>
+        <p>Nabízíme moderní pracovní prostředí v centru Prahy, flexibilní pracovní dobu a možnost částečné práce z domova.</p>
+    </div>
+    
+    <div class="Benefit">Stravenky / příspěvek na stravování</div>
+    <div class="Benefit">5 týdnů dovolené</div>
+    <div class="Benefit">Sick days</div>
+    <div class="Benefit">Multisport karta</div>
+    <div class="Benefit">Jazykové kurzy</div>
+    <div class="Benefit">Možnost práce z domova</div>
+    
+    <script>window.jobs.areLinksDisabled = false;</script>
+    <script src="https://ijobs.cz/build/324.8f62c272.js"></script>
+    <script src="https://ijobs.cz/build/3393.2ac784fe.js"></script>
+    <script src="https://ijobs.cz/build/6782.9d1f326d.js"></script>
+    <script src="https://ijobs.cz/build/9472.7d60eece.js"></script>
+    <script src="https://ijobs.cz/build/2947.5b92a48e.js"></script>
+    <script src="https://ijobs.cz/build/1411.fb984a24.js"></script>
+    <script src="https://ijobs.cz/build/JobDescriptionEntry.28464833.js"></script>
+</body>
+</html> 
