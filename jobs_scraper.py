@@ -6,6 +6,10 @@ import logging
 import json
 import sys
 import os
+import ssl
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -27,6 +31,9 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Potlačení varování o nezabezpečených požadavcích
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.info(f"Skript spuštěn z adresáře: {os.getcwd()}")
 logging.info(f"Adresář skriptu: {script_dir}")
@@ -123,6 +130,18 @@ class JobsScraper:
         self.jobs_data = []
         self.test_mode = TEST_MODE
         
+        # Nastavení session pro requests s retry logikou
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=5,  # Celkový počet pokusů
+            backoff_factor=1,  # Faktor pro exponenciální čekání mezi pokusy
+            status_forcelist=[429, 500, 502, 503, 504],  # HTTP kódy, pro které se má opakovat požadavek
+            allowed_methods=["GET"]  # Povolené metody pro retry
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
         # Nastavení Google Docs API
         self.SCOPES = ['https://www.googleapis.com/auth/documents']
         self.DOCUMENT_ID = os.getenv('DOCUMENT_ID')
@@ -206,9 +225,13 @@ class JobsScraper:
                                 url = text[url_start:url_end].strip()
                                 existing_urls.append(url)
             
+            logging.info(f"Načteno {len(existing_urls)} existujících nabídek z Google Docs")
             return existing_urls
         except HttpError as err:
             logging.error(f"Chyba při načítání existujících nabídek: {err}")
+            return []
+        except Exception as e:
+            logging.error(f"Neočekávaná chyba při načítání existujících nabídek: {e}")
             return []
 
     def parse_job_listing(self, job_element):
@@ -251,44 +274,69 @@ class JobsScraper:
     def get_job_details(self, url):
         """
         # Získá detailní informace o pracovní nabídce z její stránky
-        # Stahuje informace o společnosti, platu a popisu pozice
         # Parametry:
         #   url: str - URL adresa nabídky
         # Returns:
-        #   dict: slovník s detaily nabídky nebo None při chybě
+        #   dict: slovník s detaily nabídky (společnost, lokalita, popis)
         # Raises:
-        #   RequestException: při problému se stažením stránky
+        #   RequestException: při problému s HTTP požadavkem
         """
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
+            logging.info(f"Stahuji detaily nabídky: {url}")
+            
+            # Přidání náhodného user-agent pro snížení pravděpodobnosti blokování
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'cs,en-US;q=0.7,en;q=0.3',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0'
+            }
+            
+            # Použití session s retry logikou a timeout
+            try:
+                response = self.session.get(url, headers=headers, timeout=15, verify=False)
+                response.raise_for_status()
+            except requests.exceptions.SSLError as ssl_err:
+                logging.warning(f"SSL chyba při stahování {url}: {ssl_err}")
+                # Zkusíme znovu s vypnutou SSL verifikací
+                response = self.session.get(url, headers=headers, timeout=15, verify=False)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as req_err:
+                logging.error(f"Chyba při stahování detailů nabídky {url}: {req_err}")
+                # Zkusíme ještě jednou s delším timeoutem
+                time.sleep(5)  # Počkáme 5 sekund
+                response = self.session.get(url, headers=headers, timeout=30, verify=False)
+                response.raise_for_status()
+                
             soup = BeautifulSoup(response.content, 'html.parser')
-
+            
             # Extrakce informací o společnosti
-            company = soup.find('div', class_="IconWithText")
-            company_name = company.find('p', class_="typography-body-medium-text-regular").text.strip() if company else "Neuvedeno"
-
-            # Extrakce informací o platu
-            salary_element = soup.find("div", {"data-test": "jd-salary"})
-            salary = salary_element.find("p", class_="typography-body-medium-text-regular").text.strip() if salary_element else "Neuvedeno"
-
-            # Extrakce popisu pozice
-            description_element = soup.find("div", {"data-test": "jd-body-richtext"})
-            description = description_element.text.strip() if description_element else "Neuvedeno"
-
+            company_element = soup.find('a', class_="Typography--link")
+            company = company_element.text.strip() if company_element else "Neznámá společnost"
+            
             # Extrakce lokality
-            location_element = soup.find("div", {"data-test": "jd-workplace"})
-            location = location_element.text.strip() if location_element else "Neuvedeno"
-
+            location_element = soup.find('span', class_="Typography--bodyMedium")
+            location = location_element.text.strip() if location_element else "Neznámá lokalita"
+            
+            # Extrakce popisu
+            description_element = soup.find('div', class_="Typography--bodyLarge")
+            description = description_element.text.strip() if description_element else "Bez popisu"
+            
             return {
-                "company": company_name,
-                "salary": salary,
-                "description": description,
-                "location": location
+                'company': company,
+                'location': location,
+                'description': description[:500] + '...' if len(description) > 500 else description  # Omezení délky popisu
             }
         except Exception as e:
-            logging.error(f"Chyba při získávání detailů nabídky: {e}")
-            return None
+            logging.error(f"Chyba při získávání detailů nabídky {url}: {e}")
+            # Vrátíme alespoň částečné informace, pokud jsou k dispozici
+            return {
+                'company': "Chyba při načítání",
+                'location': "Chyba při načítání",
+                'description': f"Chyba při načítání detailů: {str(e)[:100]}..."
+            }
 
     def append_to_docs(self, new_jobs):
         """
@@ -344,15 +392,7 @@ class JobsScraper:
             
             # Přidáme jednotlivé nabídky
             for job in new_jobs:
-                job_text = (
-                    f"Pozice: {job['title']}\n"
-                    f"Společnost: {job['company']}\n"
-                    f"Lokalita: {job['location']}\n"
-                    f"Plat: {job['salary']}\n"
-                    f"URL: {job['link']}\n"
-                    f"Popis: {job['description']}\n\n"
-                    f"-------------------------------------------\n\n"
-                )
+                job_text = f"\n• {job['title']} - {job['company']} ({job['location']})\n  {job['link']}\n  {job['description']}\n"
                 
                 requests.append({
                     'insertText': {
@@ -366,14 +406,63 @@ class JobsScraper:
                 end_index += len(job_text)
             
             # Provedeme aktualizaci dokumentu
-            self.service.documents().batchUpdate(
-                documentId=self.DOCUMENT_ID,
-                body={'requests': requests}
-            ).execute()
+            logging.info(f"Přidávám {len(new_jobs)} nových nabídek do Google Docs")
             
-            logging.info(f"Přidáno {len(new_jobs)} nových nabídek do Google Docs")
+            # Rozdělíme požadavky na menší dávky, pokud je jich příliš mnoho
+            # Google Docs API má limit na počet požadavků v jednom volání
+            batch_size = 10
+            for i in range(0, len(requests), batch_size):
+                batch_requests = requests[i:i+batch_size]
+                try:
+                    result = self.service.documents().batchUpdate(
+                        documentId=self.DOCUMENT_ID,
+                        body={'requests': batch_requests}
+                    ).execute()
+                    logging.info(f"Úspěšně přidána dávka {i//batch_size + 1} z {(len(requests) + batch_size - 1)//batch_size}")
+                    time.sleep(2)  # Krátká pauza mezi dávkami
+                except HttpError as err:
+                    logging.error(f"Chyba při aktualizaci dokumentu (dávka {i//batch_size + 1}): {err}")
+                    # Pokud selže dávka, zkusíme přidat požadavky jeden po druhém
+                    for j, req in enumerate(batch_requests):
+                        try:
+                            self.service.documents().batchUpdate(
+                                documentId=self.DOCUMENT_ID,
+                                body={'requests': [req]}
+                            ).execute()
+                            logging.info(f"Úspěšně přidán požadavek {j+1} z dávky {i//batch_size + 1}")
+                        except HttpError as single_err:
+                            logging.error(f"Chyba při přidání jednotlivého požadavku: {single_err}")
+                        time.sleep(1)
+            
+            logging.info(f"Úspěšně přidáno {len(new_jobs)} nových nabídek do Google Docs")
+            
         except HttpError as err:
-            logging.error(f"Chyba při ukládání do Google Docs: {err}")
+            logging.error(f"Chyba při aktualizaci Google Docs: {err}")
+            if "Invalid requests[0].insertText" in str(err):
+                logging.error("Chyba může být způsobena neplatným indexem v dokumentu")
+                logging.error("Zkusím alternativní metodu přidání obsahu")
+                try:
+                    # Alternativní metoda - přidání obsahu na konec dokumentu
+                    content = f"\n\nNové nabídky nalezené {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}:\n\n"
+                    for job in new_jobs:
+                        content += f"• {job['title']} - {job['company']} ({job['location']})\n  {job['link']}\n  {job['description']}\n\n"
+                    
+                    self.service.documents().batchUpdate(
+                        documentId=self.DOCUMENT_ID,
+                        body={
+                            'requests': [{
+                                'insertText': {
+                                    'endOfSegmentLocation': {},
+                                    'text': content
+                                }
+                            }]
+                        }
+                    ).execute()
+                    logging.info("Úspěšně přidán obsah alternativní metodou")
+                except Exception as alt_err:
+                    logging.error(f"Alternativní metoda také selhala: {alt_err}")
+        except Exception as e:
+            logging.error(f"Neočekávaná chyba při aktualizaci dokumentu: {e}")
 
     def scrape_jobs(self):
         """
@@ -383,113 +472,163 @@ class JobsScraper:
         # Returns:
         #   list[dict]: seznam nových pracovních nabídek
         """
-        existing_jobs = self.get_existing_jobs()
-        new_jobs = []
-        
-        # Pomocný set pro sledování již zpracovaných URL v rámci aktuálního běhu
-        processed_urls = set(existing_jobs)
-
-        # Procházení všech zadaných lokalit
-        for location, radius in self.locations:
-            page = 1
-            consecutive_empty_pages = 0
-            max_empty_pages = 3  # Pokud 3 stránky po sobě nemají nové nabídky, ukončíme procházení
+        try:
+            existing_jobs = self.get_existing_jobs()
+            new_jobs = []
             
-            while True:
-                try:
-                    # Sestavení URL pro aktuální stránku a lokalitu
-                    url = f"https://www.jobs.cz/prace/{location}/?q[]={self.keyword}&locality[radius]={radius}"
-                    if page > 1:
-                        url += f"&page={page}"
+            # Pomocný set pro sledování již zpracovaných URL v rámci aktuálního běhu
+            processed_urls = set(existing_jobs)
+            
+            logging.info(f"Začínám scrapování s {len(processed_urls)} již existujícími nabídkami")
 
-                    logging.info(f"Stahuji nabídky pro lokalitu {location}, stránka {page}")
-                    response = requests.get(url, timeout=10)
-                    response.raise_for_status()
-                    soup = BeautifulSoup(response.content, 'html.parser')
+            # Procházení všech zadaných lokalit
+            for location, radius in self.locations:
+                page = 1
+                consecutive_empty_pages = 0
+                max_empty_pages = 3  # Pokud 3 stránky po sobě nemají nové nabídky, ukončíme procházení
+                max_pages = 50  # Maximální počet stránek pro procházení
+                
+                while page <= max_pages:
+                    try:
+                        # Sestavení URL pro aktuální stránku a lokalitu
+                        url = f"https://www.jobs.cz/prace/{location}/?q[]={self.keyword}&locality[radius]={radius}"
+                        if page > 1:
+                            url += f"&page={page}"
 
-                    jobs = soup.find_all('h2', class_="SearchResultCard__title")
-                    
-                    # Kontrola, zda stránka obsahuje nabídky
-                    if not jobs:
-                        logging.info(f"Žádné nabídky na stránce {page} pro lokalitu {location}")
-                        break
-                    
-                    # Počítadlo nových nabídek na této stránce
-                    new_jobs_on_page = 0
-                    
-                    # Výpis počtu nalezených nabídek na stránce
-                    logging.info(f"Nalezeno {len(jobs)} nabídek na stránce {page}")
+                        logging.info(f"Stahuji nabídky pro lokalitu {location}, stránka {page}")
+                        
+                        # Přidání náhodného user-agent pro snížení pravděpodobnosti blokování
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'cs,en-US;q=0.7,en;q=0.3',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Cache-Control': 'max-age=0'
+                        }
+                        
+                        # Použití session s retry logikou a timeout
+                        try:
+                            response = self.session.get(url, headers=headers, timeout=15, verify=False)
+                            response.raise_for_status()
+                        except requests.exceptions.SSLError as ssl_err:
+                            logging.warning(f"SSL chyba při stahování {url}: {ssl_err}")
+                            # Zkusíme znovu s vypnutou SSL verifikací
+                            response = self.session.get(url, headers=headers, timeout=15, verify=False)
+                            response.raise_for_status()
+                        except requests.exceptions.RequestException as req_err:
+                            logging.error(f"Chyba při stahování stránky {url}: {req_err}")
+                            # Zkusíme ještě jednou s delším timeoutem
+                            time.sleep(5)  # Počkáme 5 sekund
+                            response = self.session.get(url, headers=headers, timeout=30, verify=False)
+                            response.raise_for_status()
+                            
+                        soup = BeautifulSoup(response.content, 'html.parser')
 
-                    for job in jobs:
-                        title, link = self.parse_job_listing(job)
-                        if not title or not link:
+                        jobs = soup.find_all('h2', class_="SearchResultCard__title")
+                        
+                        # Kontrola, zda stránka obsahuje nabídky
+                        if not jobs:
+                            logging.info(f"Žádné nabídky na stránce {page} pro lokalitu {location}")
+                            consecutive_empty_pages += 1
+                            if consecutive_empty_pages >= max_empty_pages:
+                                logging.info(f"Ukončuji procházení pro lokalitu {location} - {max_empty_pages} prázdných stránek po sobě")
+                                break
+                            page += 1
+                            time.sleep(2)
                             continue
+                        
+                        # Počítadlo nových nabídek na této stránce
+                        new_jobs_on_page = 0
+                        
+                        # Výpis počtu nalezených nabídek na stránce
+                        logging.info(f"Nalezeno {len(jobs)} nabídek na stránce {page}")
 
-                        # Kontrola duplicit - jak proti existujícím nabídkám, tak proti již zpracovaným v tomto běhu
-                        if link not in processed_urls:
-                            processed_urls.add(link)  # Přidáme do zpracovaných URL
-                            details = self.get_job_details(link)
-                            if details:
-                                job_data = {
-                                    'title': title,
-                                    'link': link,
-                                    **details
-                                }
-                                new_jobs.append(job_data)
-                                new_jobs_on_page += 1
-                                logging.info(f"Nalezena nová nabídka: {title} v {location}")
-                                time.sleep(1)  # Prodleva mezi požadavky
+                        for job in jobs:
+                            title, link = self.parse_job_listing(job)
+                            if not title or not link:
+                                continue
+
+                            # Kontrola duplicit - jak proti existujícím nabídkám, tak proti již zpracovaným v tomto běhu
+                            if link not in processed_urls:
+                                processed_urls.add(link)  # Přidáme do zpracovaných URL
+                                details = self.get_job_details(link)
+                                if details:
+                                    job_data = {
+                                        'title': title,
+                                        'link': link,
+                                        **details
+                                    }
+                                    new_jobs.append(job_data)
+                                    new_jobs_on_page += 1
+                                    logging.info(f"Nalezena nová nabídka: {title} v {location}")
+                                    time.sleep(1)  # Prodleva mezi požadavky
+                            else:
+                                logging.info(f"Přeskakuji duplicitní nabídku: {title}")
+                        
+                        # Kontrola, zda jsme našli nějaké nové nabídky na této stránce
+                        if new_jobs_on_page == 0:
+                            consecutive_empty_pages += 1
+                            logging.info(f"Žádné nové nabídky na stránce {page}, počet prázdných stránek po sobě: {consecutive_empty_pages}")
+                            if consecutive_empty_pages >= max_empty_pages:
+                                logging.info(f"Ukončuji procházení pro lokalitu {location} - {max_empty_pages} prázdných stránek po sobě")
+                                break
                         else:
-                            logging.info(f"Přeskakuji duplicitní nabídku: {title}")
-                    
-                    # Kontrola, zda jsme našli nějaké nové nabídky na této stránce
-                    if new_jobs_on_page == 0:
-                        consecutive_empty_pages += 1
-                        logging.info(f"Žádné nové nabídky na stránce {page}, počet prázdných stránek po sobě: {consecutive_empty_pages}")
-                        if consecutive_empty_pages >= max_empty_pages:
-                            logging.info(f"Ukončuji procházení pro lokalitu {location} - {max_empty_pages} prázdných stránek po sobě")
+                            consecutive_empty_pages = 0  # Resetujeme počítadlo, pokud jsme našli nějaké nové nabídky
+                            logging.info(f"Nalezeno {new_jobs_on_page} nových nabídek na stránce {page}")
+
+                        page += 1
+                        time.sleep(2)  # Prodleva mezi stránkami
+
+                        # V testovacím režimu omezíme počet stránek
+                        if self.test_mode and page > 1:
+                            logging.info("TEST_MODE: Omezení na 1 stránku výsledků")
                             break
-                    else:
-                        consecutive_empty_pages = 0  # Resetujeme počítadlo, pokud jsme našli nějaké nové nabídky
-                        logging.info(f"Nalezeno {new_jobs_on_page} nových nabídek na stránce {page}")
+                        
+                        # Kontrola, zda jsme dosáhli maximálního počtu stránek
+                        if page > max_pages:
+                            logging.warning(f"Dosažen maximální počet stránek ({max_pages}) pro lokalitu {location}")
+                            break
 
-                    page += 1
-                    time.sleep(2)  # Prodleva mezi stránkami
+                    except Exception as e:
+                        logging.error(f"Chyba při scrapování stránky {page} pro lokalitu {location}: {e}")
+                        # Pokračujeme další stránkou i v případě chyby
+                        page += 1
+                        time.sleep(5)  # Delší pauza po chybě
+                        continue
 
-                    # V testovacím režimu omezíme počet stránek
-                    if self.test_mode and page > 1:
-                        logging.info("TEST_MODE: Omezení na 1 stránku výsledků")
-                        break
-                    
-                    # Omezení maximálního počtu stránek (pro případ, že by web vracel nekonečně mnoho stránek)
-                    if page > 50:
-                        logging.warning(f"Dosažen maximální počet stránek (50) pro lokalitu {location}")
-                        break
-
-                except Exception as e:
-                    logging.error(f"Chyba při scrapování stránky {page} pro lokalitu {location}: {e}")
-                    break
-
-        # Výpis souhrnných informací
-        logging.info(f"Celkem nalezeno {len(new_jobs)} nových nabídek")
-        
-        if new_jobs:
-            self.append_to_docs(new_jobs)
-        return new_jobs
+            # Výpis souhrnných informací
+            logging.info(f"Celkem nalezeno {len(new_jobs)} nových nabídek")
+            
+            if new_jobs:
+                self.append_to_docs(new_jobs)
+                return new_jobs
+            else:
+                logging.info("Nebyly nalezeny žádné nové nabídky")
+                return []
+                
+        except Exception as e:
+            logging.error(f"Kritická chyba při scrapování: {e}")
+            return []
 
 def main():
     """
     # Hlavní funkce programu
     # Definuje lokality pro vyhledávání a spouští scraping
     """
-    # Definice lokalit a jejich radiusů
-    locations = [
-        ("plzen", 20),  # Plzeň s radiusem 20 km
-        ("praha", 10)   # Praha s radiusem 10 km
-    ]
-    
-    scraper = JobsScraper(locations)
-    scraper.scrape_jobs()
+    try:
+        # Definice lokalit a jejich radiusů
+        locations = [
+            ("plzen", 20),  # Plzeň s radiusem 20 km
+            ("praha", 10)   # Praha s radiusem 10 km
+        ]
+        
+        scraper = JobsScraper(locations)
+        scraper.scrape_jobs()
+        logging.info("Scraping dokončen úspěšně")
+    except Exception as e:
+        logging.error(f"Neočekávaná chyba v hlavní funkci: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
