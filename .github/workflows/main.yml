@@ -69,8 +69,6 @@ jobs:
     - name: Run scraper
       env:
         DOCUMENT_ID: ${{ secrets.DOCUMENT_ID }}
-        # Přidáme proměnnou pro testovací režim
-        TEST_MODE: "true"
       run: |
         # Zjistíme, kde přesně je soubor jobs_scraper.py
         find . -name "jobs_scraper.py" -type f
