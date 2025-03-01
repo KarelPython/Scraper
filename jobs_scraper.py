@@ -5,14 +5,12 @@ from datetime import datetime
 import logging
 import json
 import sys
-from google.oauth2.credentials import Credentials
+import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import os
 
 # Nastavení logování pro sledování průběhu scrapování a případných chyb
-# Logy se ukládají do souboru scraper.log a zároveň se zobrazují v konzoli
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -22,13 +20,43 @@ logging.basicConfig(
     ]
 )
 
-# Ověření platnosti JSON souboru s credentials
+# Ověření existence a platnosti JSON souboru s credentials
 try:
-    with open('credentials.json', 'r') as f:
-        json.load(f)
-    logging.info("Credentials file is valid JSON")
-except json.JSONDecodeError as e:
-    logging.error(f"Invalid credentials file: {e}")
+    credentials_path = 'credentials.json'
+    
+    if not os.path.exists(credentials_path):
+        logging.error(f"Credentials file not found at {credentials_path}")
+        sys.exit(1)
+    
+    # Pokus o načtení a opravu JSON souboru
+    with open(credentials_path, 'r') as f:
+        credentials_content = f.read().strip()
+    
+    # Pokus o parsování JSON
+    try:
+        json.loads(credentials_content)
+        logging.info(f"Credentials file is valid JSON")
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid credentials file: {e}")
+        logging.info("Attempting to fix common JSON formatting issues...")
+        
+        # Pokus o opravu běžných problémů s JSON formátem
+        if credentials_content.startswith("'") and credentials_content.endswith("'"):
+            credentials_content = credentials_content[1:-1]
+        
+        # Pokus o parsování opraveného JSON
+        try:
+            json.loads(credentials_content)
+            # Uložení opraveného JSON
+            with open(credentials_path, 'w') as f:
+                f.write(credentials_content)
+            logging.info("Successfully fixed JSON format issues")
+        except json.JSONDecodeError:
+            logging.error("Could not fix JSON format issues")
+            sys.exit(1)
+        
+except Exception as e:
+    logging.error(f"Error processing credentials file: {e}")
     sys.exit(1)
 
 class JobsScraper:
@@ -47,9 +75,21 @@ class JobsScraper:
         # Nastavení Google Docs API
         self.SCOPES = ['https://www.googleapis.com/auth/documents']
         self.DOCUMENT_ID = os.getenv('DOCUMENT_ID')
-        self.credentials = service_account.Credentials.from_service_account_file(
-            'credentials.json', scopes=self.SCOPES)
-        self.service = build('docs', 'v1', credentials=self.credentials)
+        
+        if not self.DOCUMENT_ID:
+            logging.error("DOCUMENT_ID environment variable is not set")
+            sys.exit(1)
+            
+        try:
+            self.credentials = service_account.Credentials.from_service_account_file(
+                credentials_path, scopes=self.SCOPES)
+            self.service = build('docs', 'v1', credentials=self.credentials)
+            # Test připojení k API
+            self.service.documents().get(documentId=self.DOCUMENT_ID).execute()
+            logging.info("Successfully connected to Google Docs API")
+        except Exception as e:
+            logging.error(f"Failed to initialize Google Docs API: {e}")
+            sys.exit(1)
 
     def get_existing_jobs(self):
         """

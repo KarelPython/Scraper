@@ -26,27 +26,18 @@ jobs:
         
     - name: Create credentials file
       run: |
-        # Vytvoření JSON souboru pomocí Python skriptu
-        python -c "
-        import json
-        import os
+        # Vytvoření JSON souboru přímo z tajné proměnné
+        echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
         
-        # Načtení obsahu proměnné prostředí
-        creds_json = '''${{ secrets.GOOGLE_CREDENTIALS }}'''
-        
-        # Uložení do souboru
-        with open('credentials.json', 'w') as f:
-            f.write(creds_json)
-        
-        # Ověření platnosti JSON
-        try:
-            with open('credentials.json', 'r') as f:
-                json.load(f)
-            print('Credentials file is valid JSON')
-        except json.JSONDecodeError as e:
-            print(f'Error: {e}')
-            exit(1)
-        "
+        # Kontrola formátu JSON pomocí jq (standardní nástroj pro práci s JSON)
+        sudo apt-get update && sudo apt-get install -y jq
+        if ! jq . credentials.json > /dev/null 2>&1; then
+          echo "Error: credentials.json is not a valid JSON file"
+          cat credentials.json | head -n 5
+          exit 1
+        else
+          echo "credentials.json is valid JSON"
+        fi
       
     - name: Run scraper
       env:
